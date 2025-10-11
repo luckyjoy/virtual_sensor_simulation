@@ -1,4 +1,4 @@
-name: sim-smoke
+name: Run simulation for 20 sensors over HTTP for 30s
 
 on:
   push:
@@ -43,9 +43,10 @@ jobs:
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
+          mkdir -p logs
           python run_sim.py --count 20 --transport http \
             --http-url http://localhost:8080/ingest \
-            --rate 2 --duration 30 --log-csv out.csv
+            --rate 2 --duration 30 --log-csv logs/out.csv
 
       - name: Upload CSV log artifact
         uses: actions/upload-artifact@v4
