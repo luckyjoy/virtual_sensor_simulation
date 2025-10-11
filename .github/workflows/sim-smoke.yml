@@ -25,7 +25,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt aiohttp
 
-      - name: Start HTTP collector (background)
+      - name: Start HTTP collector (background) and Wait for Readiness
         run: |
           # 1. Start the server detached
           nohup python - <<'PY' > server.log 2>&1 < /dev/null &
@@ -41,10 +41,8 @@ jobs:
           web.run_app(app, port=8080)
           PY
 
-          # 2. Add a robust wait/poll mechanism (Corrected for indentation)
-          echo "Waiting for HTTP server to start on port 8080..."
-          timeout=30 # Max wait time
-          while ! python -c "
+          # 2. Write the socket check script to a temp file
+          cat <<'EOF' > wait_for_port.py
 import socket
 import sys
 try:
@@ -54,7 +52,12 @@ try:
     sys.exit(0)
 except socket.error:
     sys.exit(1)
-"
+EOF
+          
+          # 3. Use the temp file in the robust wait/poll loop
+          echo "Waiting for HTTP server to start on port 8080..."
+          timeout=30 # Max wait time
+          while ! python wait_for_port.py
           do
               if [ $timeout -le 0 ]; then
                   echo "Error: HTTP server failed to start within the timeout."
