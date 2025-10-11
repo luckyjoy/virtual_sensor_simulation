@@ -23,13 +23,20 @@ class QueueCSVLogger:
         self.file = open(path, "w", newline="", encoding="utf-8")
         self.writer = CSVLogger(path)._writer  # <- fixed _writer
         self._task = None
+        self._stopping = False
 
     async def start(self):
         self._task = asyncio.create_task(self._writer_task())
 
     async def _writer_task(self):
         while True:
-            payload = await self.queue.get()
+            try:
+                payload = await asyncio.wait_for(self.queue.get(), timeout=1)
+            except asyncio.TimeoutError:
+                if self._stopping and self.queue.empty():
+                    break
+                continue
+
             if payload is None:
                 break
             try:
@@ -43,10 +50,14 @@ class QueueCSVLogger:
         await self.queue.put(payload)
 
     async def stop(self):
+        self._stopping = True
         await self.queue.join()
         await self.queue.put(None)
         if self._task:
-            await self._task
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                print("⚠️ Logger task was cancelled during stop.", flush=True)
         self.file.close()
 
 # ----------------------------
@@ -196,33 +207,31 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
-        # ----------------------------
         # Stop sensors first
-        # ----------------------------
         for s in sensors:
             s.stop()
 
-        # ----------------------------
-        # Wait for remaining tasks with timeout
-        # ----------------------------
+        # Wait for remaining sensor tasks with timeout
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         if tasks:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=5  # 5 seconds max
+                    timeout=5
                 )
             except asyncio.TimeoutError:
                 print("⚠️ Some tasks did not finish within timeout, proceeding with shutdown.", flush=True)
+            except asyncio.CancelledError:
+                print("⚠️ Some tasks were cancelled during shutdown.", flush=True)
 
-        # ----------------------------
-        # Stop logger last with timeout
-        # ----------------------------
+        # Stop logger safely with timeout
         if logger:
             try:
                 await asyncio.wait_for(logger.stop(), timeout=5)
             except asyncio.TimeoutError:
                 print("⚠️ Logger did not finish in time, file may be partially written.", flush=True)
+            except asyncio.CancelledError:
+                print("⚠️ Logger stop was cancelled, proceeding.", flush=True)
 
         print("🛑 Simulation stopped gracefully.", flush=True)
 
