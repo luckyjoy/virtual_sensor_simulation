@@ -1,0 +1,79 @@
+# sensor_sim/transports.py
+import asyncio, json
+from typing import Dict, Any, Optional
+from dataclasses import dataclass
+
+# MQTT (asyncio-mqtt)
+try:
+    from asyncio_mqtt import Client, MqttError
+except Exception:  # pragma: no cover
+    Client = None
+    class MqttError(Exception): pass
+
+# HTTP (aiohttp)
+import aiohttp
+
+
+@dataclass
+class MQTTConfig:
+    host: str = "localhost"
+    port: int = 1883
+    username: str = ""
+    password: str = ""
+    qos: int = 0
+    topic_prefix: str = "sim/sensors"
+
+
+class MQTTTransport:
+    def __init__(self, cfg: MQTTConfig):
+        if Client is None:
+            raise RuntimeError("asyncio-mqtt is not installed. Please `pip install asyncio-mqtt`.")
+        self.cfg = cfg
+        self._client: Optional[Client] = None
+
+    async def __aenter__(self):
+        self._client = Client(
+            hostname=self.cfg.host, port=self.cfg.port,
+            username=self.cfg.username or None, password=self.cfg.password or None
+        )
+        await self._client.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._client:
+            await self._client.disconnect()
+
+    async def publish(self, payload: Dict[str, Any]):
+        topic = f"{self.cfg.topic_prefix}/{payload['sensor_id']}/telemetry"
+        data = json.dumps(payload).encode("utf-8")
+        assert self._client is not None
+        await self._client.publish(topic, data, qos=self.cfg.qos)
+
+
+@dataclass
+class HTTPConfig:
+    url: str = "http://localhost:8080/ingest"
+    timeout_s: int = 10
+
+
+class HTTPTransport:
+    def __init__(self, cfg: HTTPConfig):
+        self.cfg = cfg
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def __aenter__(self):
+        timeout = aiohttp.ClientTimeout(total=self.cfg.timeout_s)
+        self._session = aiohttp.ClientSession(timeout=timeout)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._session:
+            await self._session.close()
+
+    async def publish(self, payload: Dict[str, Any]):
+        assert self._session is not None
+        async with self._session.post(self.cfg.url, json=payload) as resp:
+            # Read/consume to free connection
+            await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status} while posting telemetry")

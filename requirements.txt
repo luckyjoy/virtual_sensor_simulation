@@ -1,0 +1,5 @@
+aiomqtt>=1.0.0
+aiohttp>=3.9.0
+pyyaml>=6.0
+pandas>=2.0
+uvloop>=0.19; platform_system != "Windows"

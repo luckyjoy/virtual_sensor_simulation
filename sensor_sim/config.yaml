@@ -1,0 +1,37 @@
+# sensor_sim/config.yaml
+transport: mqtt   # mqtt | http
+count: 100
+rate: 1.0        # messages per second per sensor
+jitter: 0.2      # +/- seconds of random jitter
+duration: 0      # seconds; 0 = run indefinitely
+log_csv: ./out/publish_log.csv
+
+# MQTT options
+mqtt:
+  host: localhost
+  port: 1883
+  username: ""
+  password: ""
+  qos: 0
+  topic_prefix: "sim/sensors"
+
+# HTTP options
+http:
+  url: "http://localhost:8080/ingest"
+  timeout_s: 10
+
+# Fault injection
+faults:
+  drop_rate: 0.02     # probability [0..1] to skip a publish (network loss)
+  spike_rate: 0.01    # probability to send a spiky/invalid reading
+  fault_every: 0      # if >0, force a fault every N messages (deterministic)
+
+# Sensor model
+sensor:
+  firmware: "1.2.3"
+  battery_drain_pct_per_hour: 0.5
+  value:
+    base_temp_c: 24.0
+    temp_noise_sd: 0.8
+    base_humidity_pct: 40.0
+    humidity_noise_sd: 3.0

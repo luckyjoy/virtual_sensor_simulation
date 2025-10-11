@@ -1,0 +1,35 @@
+Ignore the Python cache and environment directories
+pycache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.behave/
+.tox/
+.eggs/
+.bat
+.env/
+.venv/
+env/
+venv/
+.tox/
+tmp/
+
+
+Ignore test results and reports
+allure-results/
+reports/
+*.log
+*.json
+
+Ignore build artifacts and junk files
+build/
+dist/
+*.tmp
+Thumbs.db
+.DS_Store
+
+Ignore the Dockerfile and other Docker-related files themselves
+Dockerfile
+.dockerignore

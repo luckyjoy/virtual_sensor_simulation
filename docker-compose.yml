@@ -1,0 +1,16 @@
+# docker-compose.yml
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto:/mosquitto
+
+  simulator:
+    build: .
+    depends_on:
+      - mosquitto
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["--count","100","--transport","mqtt","--mqtt-host","mosquitto","--topic-prefix","sim/sensors","--rate","1.0"]
