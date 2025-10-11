@@ -41,8 +41,10 @@ jobs:
           web.run_app(app, port=8080)
           PY
 
-          # 2. Write the socket check script to a temp file using a robust single-line echo
-          echo "import socket
+          # 2. Write the socket check script to a temp file using a robust heredoc.
+          # The closing 'EOF' must be left-aligned within this 'run' block to avoid YAML errors.
+          cat > wait_for_port.py <<'EOF'
+import socket
 import sys
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -50,7 +52,8 @@ try:
     s.close()
     sys.exit(0)
 except socket.error:
-    sys.exit(1)" > wait_for_port.py
+    sys.exit(1)
+EOF
           
           # 3. Use the temp file in the robust wait/poll loop
           echo "Waiting for HTTP server to start on port 8080..."
