@@ -25,49 +25,50 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt aiohttp
 
-        - name: Start HTTP collector (background)
-                run: |
-                  # 1. Start the server detached and redirect output
-                  nohup python - <<'PY' > server.log 2>&1 < /dev/null &
-                  import asyncio
-                  from aiohttp import web
+      - name: Start HTTP collector (background)
+        run: |
+          # 1. Start the server detached and redirect output to prevent 'I/O operation on closed file'
+          nohup python - <<'PY' > server.log 2>&1 < /dev/null &
+          import asyncio
+          from aiohttp import web
 
-                  async def ingest(request):
-                      data = await request.json()
-                      return web.json_response({"ok": True})
+          async def ingest(request):
+              data = await request.json()
+              return web.json_response({"ok": True})
 
-                  app = web.Application()
-                  app.add_routes([web.post('/ingest', ingest)])
-                  web.run_app(app, port=8080)
-                  PY
+          app = web.Application()
+          app.add_routes([web.post('/ingest', ingest)])
+          web.run_app(app, port=8080)
+          PY
 
-                  # 2. Add a robust wait/poll mechanism for the server to be ready
-                  echo "Waiting for HTTP server to start on port 8080..."
-                  timeout=30 # Max wait time
-                  while ! python -c "
-                      import socket
-                      import sys
-                      try:
-                          s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                          s.connect(('localhost', 8080))
-                          s.close()
-                          sys.exit(0)
-                      except socket.error:
-                          sys.exit(1)
-                  "; do
-                      if [ $timeout -le 0 ]; then
-                          echo "Error: HTTP server failed to start within the timeout."
-                          cat server.log
-                          exit 1
-                      fi
-                      sleep 1
-                      timeout=$((timeout - 1))
-                  done
-                  echo "HTTP server is ready."
+          # 2. Add a robust wait/poll mechanism to resolve 'Connect call failed (Errno 111)'
+          echo "Waiting for HTTP server to start on port 8080..."
+          timeout=30 # Max wait time
+          while ! python -c "
+              import socket
+              import sys
+              try:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  s.connect(('localhost', 8080))
+                  s.close()
+                  sys.exit(0)
+              except socket.error:
+                  sys.exit(1)
+          "; do
+              if [ $timeout -le 0 ]; then
+                  echo "Error: HTTP server failed to start within the timeout."
+                  cat server.log
+                  exit 1
+              fi
+              sleep 1
+              timeout=$((timeout - 1))
+          done
+          echo "HTTP server is ready."
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
           mkdir -p logs
+          # Simulation will start only after the polling step confirms the server is ready
           python run_sim.py --count 20 --transport http \
             --http-url http://localhost:8080/ingest \
             --rate 2 --duration 30 --log-csv logs/out.csv
