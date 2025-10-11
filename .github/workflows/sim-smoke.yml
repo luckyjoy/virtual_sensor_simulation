@@ -27,7 +27,8 @@ jobs:
 
       - name: Start HTTP collector (background)
         run: |
-          nohup python - <<'PY' &
+          # Redirect stdin, stdout, and stderr to properly detach the background process
+          nohup python - <<'PY' > server.log 2>&1 < /dev/null &
           import asyncio
           from aiohttp import web
 
@@ -52,4 +53,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sim-logs
-          path: out.csv
+          path: logs/out.csv
