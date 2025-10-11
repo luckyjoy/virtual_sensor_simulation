@@ -25,31 +25,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt aiohttp pyyaml aiomqtt
 
-      - name: Start HTTP collector (background) and wait for readiness
+      - name: Start HTTP collector
         run: |
-          # Write a tiny aiohttp server to server.py
-          cat > server.py <<'EOF'
-import asyncio
-from aiohttp import web
-
-async def ingest(request):
-    try:
-        data = await request.json()
-    except Exception:
-        data = None
-    return web.json_response({"ok": True})
-
-app = web.Application()
-app.add_routes([web.post('/ingest', ingest)])
-
-if __name__ == "__main__":
-    web.run_app(app, port=8080)
-EOF
-
-          # Start the server in the background
           nohup python server.py > server.log 2>&1 &
-
-          # Wait until port 8080 is open (max 30 s)
           echo "Waiting for HTTP server to start..."
           for i in {1..30}; do
             if nc -z localhost 8080; then
@@ -58,9 +36,8 @@ EOF
             fi
             sleep 1
           done
-
           if ! nc -z localhost 8080; then
-            echo "❌ HTTP server failed to start in time. Log output:"
+            echo "❌ HTTP server failed to start. Log output:"
             cat server.log
             exit 1
           fi
