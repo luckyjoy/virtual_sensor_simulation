@@ -157,7 +157,11 @@ async def main():
     finally:
         for s in sensors:
             s.stop()
+        await asyncio.sleep(0.5)  # give any in-flight logs time to flush
+        if logger:
+            logger.close()
         print("🛑 Simulation stopped.", flush=True)
+
 
 if __name__ == "__main__":
     try:
