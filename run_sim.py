@@ -198,7 +198,7 @@ async def main():
             t.cancel()
         await asyncio.gather(*all_tasks, return_exceptions=True)
 
-        # Close transport/session
+        # Close transport/session safely
         for s in sensors:
             session = getattr(s, "session", None)
             if session and hasattr(session, "close") and not session.closed:
@@ -207,7 +207,7 @@ async def main():
                 except Exception:
                     pass
 
-        # Close logger last
+        # Close logger **after all tasks are done**
         if logger:
             try:
                 logger.close()
