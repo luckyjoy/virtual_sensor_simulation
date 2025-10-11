@@ -93,7 +93,6 @@ async def main():
         cfg = load_config(args.config)
 
     def get_config_value(path: str, default=None):
-        """Retrieve a nested value from the config dictionary using dot-separated keys."""
         cur = cfg
         for part in path.split("."):
             if isinstance(cur, dict) and part in cur:
@@ -171,7 +170,7 @@ async def main():
                 nonlocal message_counter
                 try:
                     if logger and logger._closed:
-                        return  # skip writes after close
+                        return
                     await tx.publish(json.dumps(payload))
                     message_counter += 1
                     if message_counter % 100 == 0:
@@ -202,16 +201,22 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
-        # Stop all sensors first
+        # ----------------------------
+        # 1️⃣ Stop all sensors first
+        # ----------------------------
         for s in sensors:
             s.stop()
 
-        # Wait for all remaining tasks to finish
+        # ----------------------------
+        # 2️⃣ Wait for all remaining sensor tasks
+        # ----------------------------
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Close logger last
+        # ----------------------------
+        # 3️⃣ Close logger last
+        # ----------------------------
         if logger:
             logger.close()
 

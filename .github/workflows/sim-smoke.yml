@@ -23,24 +23,38 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt aiohttp pyyaml aiomqtt
+          pip install -r requirements.txt aiohttp
 
-      - name: Start HTTP collector
+      - name: Start HTTP collector in background
+        id: start_server
         run: |
-          nohup python server.py > server.log 2>&1 &
-          echo "Waiting for HTTP server to start..."
+          # Start server in background and save PID
+          nohup python - <<'PY' > server.log 2>&1 &
+          import asyncio
+          from aiohttp import web
+
+          async def ingest(request):
+              data = await request.json()
+              return web.json_response({"ok": True})
+
+          app = web.Application()
+          app.add_routes([web.post('/ingest', ingest)])
+          web.run_app(app, port=8080)
+          PY
+          echo $! > server.pid
+          echo "Server PID: $(cat server.pid)"
+
+      - name: Wait for HTTP server readiness
+        run: |
+          echo "Waiting for HTTP server on port 8080..."
           for i in {1..30}; do
-            if nc -z localhost 8080; then
-              echo "✅ HTTP server is ready."
-              break
-            fi
-            sleep 1
+              if nc -z localhost 8080; then
+                  echo "HTTP server is ready!"
+                  break
+              fi
+              sleep 1
           done
-          if ! nc -z localhost 8080; then
-            echo "❌ HTTP server failed to start. Log output:"
-            cat server.log
-            exit 1
-          fi
+          nc -z localhost 8080 || { echo "Server failed to start"; cat server.log; exit 1; }
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
@@ -54,3 +68,13 @@ jobs:
         with:
           name: sim-logs
           path: logs/out.csv
+
+      - name: Cleanup HTTP server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+              echo "Stopping HTTP server..."
+              kill -9 $(cat server.pid) || true
+              rm server.pid
+          fi
+          echo "Cleanup done."
