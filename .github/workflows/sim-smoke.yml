@@ -9,28 +9,46 @@ on:
 jobs:
   run-sim:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: Start a test HTTP collector
+          pip install -r requirements.txt aiohttp
+
+      - name: Start HTTP collector (background)
         run: |
-          python - <<'PY'
-import asyncio
-from aiohttp import web
-async def ingest(request):
-    data = await request.json()
-    return web.json_response({"ok": True})
-app = web.Application()
-app.add_routes([web.post('/ingest', ingest)])
-web.run_app(app, port=8080)
-PY
-        background: true
-      - name: Run 100 sensors over HTTP for 30s
+          nohup python - <<'PY' &
+          import asyncio
+          from aiohttp import web
+
+          async def ingest(request):
+              data = await request.json()
+              return web.json_response({"ok": True})
+
+          app = web.Application()
+          app.add_routes([web.post('/ingest', ingest)])
+          web.run_app(app, port=8080)
+          PY
+          sleep 5  # allow time for server startup
+
+      - name: Run 20 sensors over HTTP for 30s
         run: |
-          python run_sim.py --count 20 --transport http --http-url http://localhost:8080/ingest --rate 2 --duration 30 --log-csv out.csv
+          python run_sim.py --count 20 --transport http \
+            --http-url http://localhost:8080/ingest \
+            --rate 2 --duration 30 --log-csv out.csv
+
+      - name: Upload CSV log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-logs
+          path: out.csv
