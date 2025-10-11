@@ -13,17 +13,27 @@ from sensor_sim.transports import (
     MQTTTransport, MQTTConfig, HTTPTransport, HTTPConfig
 )
 
-# 🩵 Fully async-safe CSVLogger
+# 🩵 Fully async-safe CSV logger
 class SafeCSVLogger(CSVLogger):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._closed = False
+        self._lock = asyncio.Lock()
+
+    async def log_async(self, record):
+        async with self._lock:
+            if self._closed:
+                return
+            try:
+                self.writer.writerow(record)
+                self.file.flush()
+            except Exception:
+                pass
 
     def log(self, record):
-        if self._closed:
-            return  # ignore writes after close
+        # fallback for sync calls
         try:
-            super().log(record)
+            asyncio.run(self.log_async(record))
         except Exception:
             pass
 
@@ -33,6 +43,7 @@ class SafeCSVLogger(CSVLogger):
             super().close()
         except Exception:
             pass
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Virtual Sensor Simulator")
