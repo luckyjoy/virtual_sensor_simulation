@@ -1,4 +1,3 @@
-#run_sim.py
 import asyncio, argparse, random, os, sys, yaml, json
 from typing import List
 import aiomqtt
@@ -51,9 +50,11 @@ def parse_args():
     p.add_argument("--log-csv", type=str, default="")
     return p.parse_args()
 
+
 def load_config(path: str):
     with open(path, "r") as fh:
         return yaml.safe_load(fh)
+
 
 async def main():
     args = parse_args()
@@ -154,13 +155,33 @@ async def main():
     except Exception as e:
         print(f"❌ Unexpected error: {e}", flush=True)
         return 1
+
+    # 🩵 FIX: make cleanup fully async-safe and graceful
     finally:
+        print("🧹 Cleaning up...", flush=True)
         for s in sensors:
             s.stop()
-        await asyncio.sleep(0.5)  # give any in-flight logs time to flush
-        if logger:
-            logger.close()
-        print("🛑 Simulation stopped.", flush=True)
+
+        # Give pending HTTP publishes time to finish
+        await asyncio.sleep(1.0)
+
+        # Gracefully close any aiohttp sessions (for HTTP transport)
+        for s in sensors:
+            session = getattr(s, "session", None)
+            if session and hasattr(session, "close") and not session.closed:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+
+        # Close the logger properly
+        if logger and hasattr(logger, "close"):
+            try:
+                logger.close()
+            except Exception:
+                pass
+
+        print("🛑 Simulation stopped gracefully.", flush=True)
 
 
 if __name__ == "__main__":
