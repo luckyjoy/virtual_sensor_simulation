@@ -1,68 +1,148 @@
-# Virtual Sensor Simulator (100+ sensors)
-# MQTT (Message Queuing Telemetry Transport) is a lightweight, publish-subscribe messaging protocol. 
-# It's used in environments with low bandwidth or unreliable network connections, such as IoT devices.
-# The protocol operates on a client-server model with a central component called a broker.
-# Publisher: A client that sends messages to the broker.
-# Subscriber: A client that receives messages from the broker.
-# Broker: The server that receives all messages from publishers, filters them by topic, and distributes them to all interested subscribers.
+# 🚀 Virtual Sensor Simulator (100+ Sensors)
 
+[![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg?logo=python)](https://www.python.org/)  
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)  
+[![Build](https://img.shields.io/github/actions/workflow/status/luckyjoy/virtual_sensor_simulation/ci.yml?label=CI%2FCD)](https://github.com/luckyjoy/virtual_sensor_simulation/actions)  
+[![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker)](https://hub.docker.com/)  
+[![MQTT](https://img.shields.io/badge/MQTT-Asyncio--MQTT-orange)](https://mqtt.org/)
 
-# start mosquitto
-# netstat -an | findstr 1883
-mqtt broker: mosquitto_sub -h localhost -t "sim/sensors/#"
+A high-performance **virtual IoT sensor simulator** built for **embedded systems** and **firmware CI/CD** environments.  
+It enables **large‑scale load testing**, **data validation**, and **MQTT / HTTP transport** performance benchmarking.
 
-The Virtual sensor simulator's functionality and performance Designed for **embedded/firmware CI/CD** load and integration testing. 
-Uses asyncio for scale, with configurable rates, jitter, payload schemas, and fault injection. 
-The primary goals are to:
-- Test functionality: Verify that the script can create 100 virtual sensors and that the MQTTTransport successfully connects to a local MQTT broker.
-- Test data and transport: Confirm that sensor data is generated, serialized to JSON, and correctly published over MQTT.
-- Test load: Evaluate the system's ability to handle a total message rate of 100 messages per second without errors.
-- Test configuration: Ensure that command-line arguments are correctly parsed and applied to the simulation settings.
+---
 
-## Quick Start
+## 📘 Overview
 
-### 1) Create and activate a venv (optional)
+The simulator uses **Python asyncio** to achieve high concurrency, while allowing full configuration of:
+
+- Message rate, jitter, and duration  
+- Sensor payload schemas and noise  
+- Fault injection and recovery  
+- Logging and telemetry analysis  
+
+### 🎯 Primary Goals
+
+- Validate sensor message generation and JSON serialization  
+- Benchmark MQTT and HTTP transports  
+- Assess system throughput (e.g. 100+ msgs/sec)  
+- Provide consistent configuration via CLI or YAML  
+
+---
+
+### ⚙️ Installation
+
 ```bash
-python3 -m venv .venv && source .venv/bin/activate  # on Windows: python -m venv .venv && .venv\Scripts\activate
+git clone git clone https://github.com/luckyjoy/virtual_sensor_simulation.git
+cd robotics_tdd
+pip install -r requirements.txt  # Optional for local testing
 ```
 
-### 2) Install requirements
+---
+
+## 🌐 MQTT Architecture
+
+**MQTT (Message Queuing Telemetry Transport)** is a lightweight pub/sub protocol suited for IoT or constrained / lossy networks.
+
+| Role        | Description                                 |
+|-------------|---------------------------------------------|
+| **Publisher**  | Sends sensor data messages to the broker     |
+| **Subscriber** | Receives messages from broker subscriptions |
+| **Broker**     | Routes messages between publishers & subscribers |
+
+---
+
+## 🗺️ MQTT Flow Diagram
+
+```mermaid
+graph TD
+    A[Virtual Sensors] -->|Publish JSON data| B[MQTT Broker (Mosquitto)]
+    B -->|Route by topic: sim/sensors/#| C[Subscribers / Consumers]
+    C -->|Store / Analyze / Visualize| D[Data Platform or Dashboard]
+```
+
+---
+
+## 📁 Project Structure
+
+```
+virtual_sensor_simulation/
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── sensor_sim/
+│   ├── __init__.py
+│   ├── config.yaml
+│   ├── simulator.py
+│   └── … (other modules, classes, utils, etc.)
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── run_sim.py
+├── .dockerignore
+├── .gitignore
+└── README.md
+```
+
+---
+
+## ⚙️ Features
+
+- 🧩 Async simulation supporting **100–10,000 sensors** (host / network dependent)  
+- 🌐 Two transport modes: *MQTT* (QoS 0 / 1 via `asyncio-mqtt`) or *HTTP* (POST via `aiohttp`)  
+- ⚡ Fully configurable: message rate, jitter, duration, schemas, and fault injection  
+- 🧪 Per-sensor identity: battery models, location, noise profiles  
+- 📊 Optional CSV logging of all emitted messages  
+- 🧘 Graceful shutdown & built-in backpressure handling  
+- 🧱 CI‑friendly: designed to run in GitHub Actions, Jenkins, or other pipelines  
+
+---
+
+## 🚀 Quick Start
+
+### 1. Create & activate a Python virtual environment
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+# On Windows:
+python -m venv .venv && .venv\Scripts\activate
+```
+
+### 2. Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3) Run 100 sensors over MQTT
+### 3. Run 100 sensors over MQTT
+
 ```bash
-python run_sim.py --count 100 --transport mqtt --mqtt-host localhost --mqtt-port 1883 --topic-prefix sim/sensors --rate 1.0
+python run_sim.py --count 100 --transport mqtt   --mqtt-host localhost --mqtt-port 1883   --topic-prefix sim/sensors --rate 1.0
 ```
 
-### 4) Or run over HTTP (POST to a collector endpoint)
+### 4. Run over HTTP
+
 ```bash
-python run_sim.py --count 100 --transport http --http-url http://localhost:8080/ingest --rate 1.0
+python run_sim.py --count 100 --transport http   --http-url http://localhost:8080/ingest --rate 1.0
 ```
 
-### 5) Use a config file instead of long CLI args
+### 5. Use a config file
+
 ```bash
 python run_sim.py --config sensor_sim/config.yaml
 ```
 
-### 6) With Docker + Mosquitto broker
+### 6. Using Docker + Mosquitto
+
 ```bash
 docker compose up --build
-# In another shell (or override), run the simulator container with your args
-docker compose run --rm simulator python run_sim.py --count 100 --transport mqtt --mqtt-host mosquitto --topic-prefix sim/sensors
+# In another terminal:
+docker compose run --rm simulator python run_sim.py   --count 100 --transport mqtt --mqtt-host mosquitto --topic-prefix sim/sensors
 ```
 
-## Features
-- Async **100–10,000** virtual sensors (limited by your host/network)
-- **MQTT** (QoS 0/1) via `asyncio-mqtt` or **HTTP** via `aiohttp`
-- Configurable **rate**, **jitter**, **duration**, **payload schema**, **fault injection**
-- **Per-sensor identity**, location, battery model, and sensor value noise
-- **CSV logging** of published payloads (optional)
-- **Graceful shutdown** & backpressure handling
-- Works locally or in CI (GitHub Actions example included)
+---
 
-## Example payload
+## 🧪 Example Payload
+
 ```json
 {
   "sensor_id": "vs-0042",
@@ -76,13 +156,32 @@ docker compose run --rm simulator python run_sim.py --count 100 --transport mqtt
 }
 ```
 
-## CI usage (smoke)
-Limit to 20 sensors @ 1 Hz for 60 s:
+---
+
+## 🧱 CI/CD Smoke Test Example
+
+Launch 20 sensors at 1 Hz for 60 seconds:
+
 ```bash
-python run_sim.py --count 20 --duration 60 --rate 1 --transport mqtt --mqtt-host $BROKER_HOST
+python run_sim.py --count 20 --duration 60 --rate 1   --transport mqtt --mqtt-host $BROKER_HOST
 ```
 
-## Tips
-- Start small (20 sensors) then scale up.
-- Use `--drop-rate` for network loss, `--spike-rate` for bad readings, and `--fault-every` for deterministic faults.
-- If you run many sensors, prefer a single process with asyncio (as this project does) instead of 100 OS processes.
+---
+
+## 🧠 Tips & Best Practices
+
+- Start small (e.g. 20 sensors) before scaling up.  
+- Use flags like `--drop-rate`, `--spike-rate`, `--fault-every` to simulate edge conditions.  
+- Prefer asyncio concurrency over multiple processes for efficiency.  
+- Monitor CPU, memory, and network utilization at scale.  
+
+---
+
+## 🧩 License & Contributions
+
+This project is licensed under the **MIT License**.  
+Contributions, issues, and pull requests are welcome — feel free to open discussions or propose enhancements.
+
+---
+
+© 2025 Virtual Sensor Simulator | Maintained by [luckyjoy](https://github.com/luckyjoy)
