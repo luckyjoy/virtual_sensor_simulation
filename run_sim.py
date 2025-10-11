@@ -1,13 +1,11 @@
-# run_sim.py
-import asyncio, argparse, random, os, sys, yaml
-import json
+import asyncio, argparse, random, os, sys, yaml, json
 from typing import List
 import aiomqtt
 
 # On Windows, use the SelectorEventLoop
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
+
 from sensor_sim.sensor import (
     VirtualSensor, SensorIdentity, FaultModel, ValueModel, CSVLogger
 )
@@ -22,7 +20,7 @@ def parse_args():
     p.add_argument("--rate", type=float, default=1.0, help="Messages per second per sensor")
     p.add_argument("--jitter", type=float, default=0.2, help="Seconds of +/- jitter per publish")
     p.add_argument("--duration", type=int, default=0, help="Seconds to run (0 = infinite)")
-    p.add_argument("--transport", choices=["mqtt","http"], default="mqtt")
+    p.add_argument("--transport", choices=["mqtt", "http"], default="mqtt")
 
     # MQTT
     p.add_argument("--mqtt-host", type=str, default="localhost")
@@ -62,11 +60,11 @@ async def main():
     if args.config:
         cfg = load_config(args.config)
 
-    # resolve helper to read from cfg or args
+    # Helper to resolve nested config paths
     def C(path, default=None):
         cur = cfg
         for part in path.split("."):
-            if part in cur:
+            if isinstance(cur, dict) and part in cur:
                 cur = cur[part]
             else:
                 return default
@@ -88,7 +86,6 @@ async def main():
     temp_sd = C("sensor.value.temp_noise_sd", args.temp_sd)
     base_hum = C("sensor.value.base_humidity_pct", args.base_hum)
     hum_sd = C("sensor.value.humidity_noise_sd", args.hum_sd)
-
     log_csv = C("log_csv", args.log_csv)
 
     # Build transport
@@ -109,17 +106,15 @@ async def main():
         )
         tx_ctx = HTTPTransport(http_cfg)
 
-    # CSV logging
     logger = CSVLogger(log_csv) if log_csv else None
 
     # Create sensors
-    sensors: list[VirtualSensor] = []
+    sensors: List[VirtualSensor] = []
     for i in range(count):
         sid = f"vs-{i:04d}"
         ident = SensorIdentity(sensor_id=sid, firmware=firmware, battery_pct=100.0)
         values = ValueModel(base_temp, temp_sd, base_hum, hum_sd)
         faults = FaultModel(drop_rate, spike_rate, fault_every)
-        # placeholder on_publish; we set after entering transport context
         s = VirtualSensor(
             identity=ident, value_model=values, fault_model=faults,
             rate_hz=rate, jitter_s=jitter, battery_drain_pct_per_hour=battery_drain,
@@ -127,41 +122,41 @@ async def main():
         )
         sensors.append(s)
 
-    # Enhanced error handling for the transport
     try:
-        print(f"Starting sensor simulation with {count} sensors...")
+        print(f"🚀 Starting simulation with {count} sensors via {transport.upper()}...", flush=True)
         async with tx_ctx as tx:
             message_counter = 0
 
             async def publish(payload):
                 nonlocal message_counter
                 try:
-                    # Convert dictionary to JSON string before publishing
-                    json_payload = json.dumps(payload)
-                    await tx.publish(json_payload)
+                    await tx.publish(json.dumps(payload))
                     message_counter += 1
-                    # Add a small non-blocking sleep to prevent a message backlog
-                    await asyncio.sleep(0.001)
                     if message_counter % 100 == 0:
-                        print(f"Successfully published {message_counter} messages.")
+                        print(f"✅ Published {message_counter} messages", flush=True)
+                    await asyncio.sleep(0.001)
                 except Exception as e:
-                    print(f"Error publishing message: {e}")
+                    print(f"⚠️ Publish error: {e}", flush=True)
 
-            # inject publish callback now that transport is ready
             for s in sensors:
                 s.on_publish = publish
 
             tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
             await asyncio.gather(*tasks)
 
+        print("✅ Simulation completed successfully.", flush=True)
+        return 0
+
     except aiomqtt.exceptions.MqttError as e:
-        print(f"MQTT connection failed: {e}")
+        print(f"❌ MQTT connection failed: {e}", flush=True)
+        return 1
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"❌ Unexpected error: {e}", flush=True)
+        return 1
     finally:
-        print("Simulation stopped.")
         for s in sensors:
             s.stop()
+        print("🛑 Simulation stopped.", flush=True)
 
 if __name__ == "__main__":
     try:
@@ -170,7 +165,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     try:
-        asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
-         print("\n🛑 Keyboard Interrupted. Exiting gracefully...")
-        
+        print("\n🛑 Keyboard Interrupted. Exiting gracefully...", flush=True)
+        sys.exit(0)
