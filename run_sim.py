@@ -1,74 +1,260 @@
-@echo off
-setlocal
-set REPORT_OUTPUT_DIR=allure-report
-set REPORT_PORT=8000
+import asyncio, argparse, random, os, sys, yaml, json
+from typing import List
+import aiomqtt
 
-echo.
-echo ==========================================================
-echo           Allure Report Generation with History
-echo ==========================================================
-echo.
+# On Windows, use SelectorEventLoop
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-rem --- 1. Cleanup and Preparation ---
-rem Delete old results to ensure a fresh run.
-IF EXIST allure-results rmdir /s /q allure-results >nul
-echo Running pytest and collecting results into allure-results...
-pytest --alluredir=allure-results
-echo.
-
-rem --- 2. Copy Environment Properties and Categories ---
-echo Copying categories.json and environment.properties into the report directory...
-rem Assuming 'supports' folder is in the project root.
-copy supports\windows.properties allure-results\environment.properties >nul
-copy supports\categories.json allure-results\ >nul
-echo Environment files copied successfully.
-echo.
-
-rem --- 3. CRITICAL STEP: Copy previous report history for trending ---
-IF EXIST "%REPORT_OUTPUT_DIR%\history" (
-    echo Found previous history data. Copying to allure-results...
-    xcopy "%REPORT_OUTPUT_DIR%\history" "allure-results\history\" /E /I /Q /Y >nul
-    echo History copied from "%REPORT_OUTPUT_DIR%\history"
-) ELSE (
-    echo Previous report history folder not found at "%REPORT_OUTPUT_DIR%\history". Trend will start from this run.
+from sensor_sim.sensor import (
+    VirtualSensor, SensorIdentity, FaultModel, ValueModel, CSVLogger
 )
-echo.
+from sensor_sim.transports import (
+    MQTTTransport, MQTTConfig, HTTPTransport, HTTPConfig
+)
 
-rem --- 4. Generate Persistent Report (Enable Trend) ---
-echo Generating Allure Report into persistent folder: %REPORT_OUTPUT_DIR%
-rem The --clean flag ensures the folder is clean before merging data.
-allure generate allure-results --clean -o %REPORT_OUTPUT_DIR%
-echo.
+# ----------------------------
+# Async-safe CSV Logger
+# ----------------------------
+class SafeCSVLogger(CSVLogger):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._closed = False
+        self._lock = asyncio.Lock()
 
-rem --- 5. Start a local server and open the report ---
-rem FINAL ATTEMPT: This uses the most standard Windows command `start` to launch the URL.
-echo ======================================================================
-echo  >> Starting a temporary web server to display the report... <<
-echo.
-echo  A new command window will open for the server process.
-echo  To stop the server, simply CLOSE that new window.
-echo ======================================================================
+    async def log_async(self, record):
+        async with self._lock:
+            if self._closed:
+                return
+            try:
+                self.writer.writerow(record)
+                self.file.flush()
+            except Exception:
+                pass
 
-rem Change directory to the report folder to serve files from there.
-pushd %REPORT_OUTPUT_DIR%
+    def log(self, record):
+        try:
+            asyncio.run(self.log_async(record))
+        except Exception:
+            pass
 
-rem Start Python's built-in HTTP server in a new, non-blocking window.
-start "Allure Report Server" python -m http.server %REPORT_PORT%
+    def close(self):
+        self._closed = True
+        try:
+            super().close()
+        except Exception:
+            pass
 
-rem Give the server a generous moment to start up.
-echo Waiting for server to initialize...
-ping -n 6 127.0.0.1 >nul
+# ----------------------------
+# Safe VirtualSensor
+# ----------------------------
+class SafeVirtualSensor(VirtualSensor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)  # ensures all parent methods exist
+        self._stopping = False
 
-rem Launch the browser to the local server URL using the most basic `start` command.
-echo Opening report at http://localhost:%REPORT_PORT% ...
-start http://localhost:%REPORT_PORT%
+    async def run(self, duration_s=0):
+        start = asyncio.get_event_loop().time()
+        while True:
+            now = asyncio.get_event_loop().time()
+            if duration_s and now - start >= duration_s:
+                break
+            payload = self.generate_payload()  # works now
+            if self.on_publish and not self._stopping:
+                try:
+                    await self.on_publish(payload)
+                except Exception:
+                    pass
+            await asyncio.sleep(self.next_interval())
 
-rem Return to the original directory
-popd
+    def stop(self):
+        self._stopping = True
 
-echo.
-echo Allure report generation and launch complete.
-echo Report is permanently saved in the "%REPORT_OUTPUT_DIR%" folder.
+# ----------------------------
+# CLI / main
+# ----------------------------
+def parse_args():
+    p = argparse.ArgumentParser(description="Virtual Sensor Simulator")
+    p.add_argument("--config", type=str, default="", help="Path to YAML config")
+    p.add_argument("--count", type=int, default=100, help="Number of sensors")
+    p.add_argument("--rate", type=float, default=1.0, help="Messages per second per sensor")
+    p.add_argument("--jitter", type=float, default=0.2, help="Seconds of +/- jitter per publish")
+    p.add_argument("--duration", type=int, default=0, help="Seconds to run (0 = infinite)")
+    p.add_argument("--transport", choices=["mqtt", "http"], default="mqtt")
+    # MQTT
+    p.add_argument("--mqtt-host", type=str, default="localhost")
+    p.add_argument("--mqtt-port", type=int, default=1883)
+    p.add_argument("--mqtt-username", type=str, default="")
+    p.add_argument("--mqtt-password", type=str, default="")
+    p.add_argument("--mqtt-qos", type=int, default=0)
+    p.add_argument("--topic-prefix", type=str, default="sim/sensors")
+    # HTTP
+    p.add_argument("--http-url", type=str, default="http://localhost:8080/ingest")
+    p.add_argument("--http-timeout", type=int, default=10)
+    # Faults
+    p.add_argument("--drop-rate", type=float, default=0.0)
+    p.add_argument("--spike-rate", type=float, default=0.0)
+    p.add_argument("--fault-every", type=int, default=0)
+    # Model
+    p.add_argument("--firmware", type=str, default="1.2.3")
+    p.add_argument("--battery-drain", type=float, default=0.5)
+    p.add_argument("--base-temp", type=float, default=24.0)
+    p.add_argument("--temp-sd", type=float, default=0.8)
+    p.add_argument("--base-hum", type=float, default=40.0)
+    p.add_argument("--hum-sd", type=float, default=3.0)
+    p.add_argument("--log-csv", type=str, default="")
+    return p.parse_args()
 
-endlocal
 
+def load_config(path: str):
+    with open(path, "r") as fh:
+        return yaml.safe_load(fh)
+
+
+async def main():
+    args = parse_args()
+    cfg = {}
+    if args.config:
+        cfg = load_config(args.config)
+
+    def C(path, default=None):
+        cur = cfg
+        for part in path.split("."):
+            if isinstance(cur, dict) and part in cur:
+                cur = cur[part]
+            else:
+                return default
+        return cur
+
+    count = C("count", args.count)
+    rate = C("rate", args.rate)
+    jitter = C("jitter", args.jitter)
+    duration = C("duration", args.duration)
+    transport = C("transport", args.transport)
+
+    drop_rate = C("faults.drop_rate", args.drop_rate)
+    spike_rate = C("faults.spike_rate", args.spike_rate)
+    fault_every = C("faults.fault_every", args.fault_every)
+
+    firmware = C("sensor.firmware", args.firmware)
+    battery_drain = C("sensor.battery_drain_pct_per_hour", args.battery_drain)
+    base_temp = C("sensor.value.base_temp_c", args.base_temp)
+    temp_sd = C("sensor.value.temp_noise_sd", args.temp_sd)
+    base_hum = C("sensor.value.base_humidity_pct", args.base_hum)
+    hum_sd = C("sensor.value.humidity_noise_sd", args.hum_sd)
+    log_csv = C("log_csv", args.log_csv)
+
+    # Transport
+    if transport == "mqtt":
+        mqtt_cfg = MQTTConfig(
+            host=C("mqtt.host", args.mqtt_host),
+            port=C("mqtt.port", args.mqtt_port),
+            username=C("mqtt.username", args.mqtt_username),
+            password=C("mqtt.password", args.mqtt_password),
+            qos=C("mqtt.qos", args.mqtt_qos),
+            topic_prefix=C("mqtt.topic_prefix", args.topic_prefix),
+        )
+        tx_ctx = MQTTTransport(mqtt_cfg)
+    else:
+        http_cfg = HTTPConfig(
+            url=C("http.url", args.http_url),
+            timeout_s=C("http.timeout_s", args.http_timeout),
+        )
+        tx_ctx = HTTPTransport(http_cfg)
+
+    logger = SafeCSVLogger(log_csv) if log_csv else None
+
+    # Sensors
+    sensors: List[SafeVirtualSensor] = []
+    for i in range(count):
+        sid = f"vs-{i:04d}"
+        ident = SensorIdentity(sensor_id=sid, firmware=firmware, battery_pct=100.0)
+        values = ValueModel(base_temp, temp_sd, base_hum, hum_sd)
+        faults = FaultModel(drop_rate, spike_rate, fault_every)
+        s = SafeVirtualSensor(
+            identity=ident, value_model=values, fault_model=faults,
+            rate_hz=rate, jitter_s=jitter, battery_drain_pct_per_hour=battery_drain,
+            on_publish=None, logger=logger
+        )
+        sensors.append(s)
+
+    try:
+        print(f"🚀 Starting simulation with {count} sensors via {transport.upper()}...", flush=True)
+        async with tx_ctx as tx:
+            message_counter = 0
+
+            async def publish(payload):
+                nonlocal message_counter
+                try:
+                    await tx.publish(json.dumps(payload))
+                    message_counter += 1
+                    if message_counter % 100 == 0:
+                        print(f"✅ Published {message_counter} messages", flush=True)
+                    await asyncio.sleep(0.001)
+                except Exception as e:
+                    print(f"⚠️ Publish error: {e}", flush=True)
+
+            for s in sensors:
+                async def safe_publish(payload, pub=publish):
+                    try:
+                        await pub(payload)
+                    except Exception:
+                        pass
+                s.on_publish = safe_publish
+
+            tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
+            await asyncio.gather(*tasks)
+
+        print("✅ Simulation completed successfully.", flush=True)
+        return 0
+
+    except aiomqtt.exceptions.MqttError as e:
+        print(f"❌ MQTT connection failed: {e}", flush=True)
+        return 1
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}", flush=True)
+        return 1
+
+    finally:
+        print("🧹 Cleaning up...", flush=True)
+
+        # Stop sensors
+        for s in sensors:
+            s.stop()
+
+        # Cancel and await all tasks
+        all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for t in all_tasks:
+            t.cancel()
+        await asyncio.gather(*all_tasks, return_exceptions=True)
+
+        # Close transport/session safely
+        for s in sensors:
+            session = getattr(s, "session", None)
+            if session and hasattr(session, "close") and not session.closed:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+
+        # Close logger last
+        if logger:
+            try:
+                logger.close()
+            except Exception:
+                pass
+
+        print("🛑 Simulation stopped gracefully.", flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        import uvloop
+        uvloop.install()
+    except Exception:
+        pass
+    try:
+        sys.exit(asyncio.run(main()))
+    except KeyboardInterrupt:
+        print("\n🛑 Keyboard Interrupted. Exiting gracefully...", flush=True)
+        sys.exit(0)
