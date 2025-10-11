@@ -13,6 +13,15 @@ from sensor_sim.transports import (
     MQTTTransport, MQTTConfig, HTTPTransport, HTTPConfig
 )
 
+# 🩵 Patch CSVLogger to ignore writes after close
+class SafeCSVLogger(CSVLogger):
+    def log(self, record):
+        try:
+            super().log(record)
+        except (ValueError, RuntimeError):
+            # File closed or invalid state, safe to ignore
+            pass
+
 def parse_args():
     p = argparse.ArgumentParser(description="Virtual Sensor Simulator")
     p.add_argument("--config", type=str, default="", help="Path to YAML config")
@@ -101,7 +110,8 @@ async def main():
         )
         tx_ctx = HTTPTransport(http_cfg)
 
-    logger = CSVLogger(log_csv) if log_csv else None
+    # Use SafeCSVLogger instead of plain CSVLogger
+    logger = SafeCSVLogger(log_csv) if log_csv else None
 
     sensors: List[VirtualSensor] = []
     for i in range(count):
@@ -130,11 +140,9 @@ async def main():
                         print(f"✅ Published {message_counter} messages", flush=True)
                     await asyncio.sleep(0.001)
                 except Exception as e:
-                    # 🩵 Safe publish wrapper: ignore closed sessions/logs
                     print(f"⚠️ Publish error: {e}", flush=True)
 
             for s in sensors:
-                # 🩵 Wrap publish safely
                 async def safe_publish(payload, pub=publish):
                     try:
                         await pub(payload)
@@ -161,11 +169,11 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
-        # Stop sensors first
+        # Stop all sensors
         for s in sensors:
             s.stop()
 
-        # Cancel any remaining tasks
+        # Wait for all remaining tasks to finish safely
         all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for t in all_tasks:
             t.cancel()
@@ -180,8 +188,8 @@ async def main():
                 except Exception:
                     pass
 
-        # Close CSV logger
-        if logger and hasattr(logger, "close"):
+        # Close CSV logger last
+        if logger:
             try:
                 logger.close()
             except Exception:
