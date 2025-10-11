@@ -55,10 +55,17 @@ pip install -r requirements.txt  # Optional for local testing
 
 ```mermaid
 graph TD
-    A[Virtual Sensors] -->|Publish JSON data| B[MQTT Broker (Mosquitto)]
-    B -->|Route by topic: sim/sensors/#| C[Subscribers / Consumers]
-    C -->|Store / Analyze / Visualize| D[Data Platform or Dashboard]
-```
+    A[Virtual Sensors] --> B[MQTT Broker (Mosquitto)]
+    B --> C[Subscribers / Consumers]
+    C --> D[Data Platform or Dashboard]
+
+    %% Optional labels (GitHub-safe)
+    A:::label
+    B:::label
+    C:::label
+    D:::label
+
+    classDef label fill:#f9f9f9,stroke:#333,stroke-width:1px;
 
 ---
 
