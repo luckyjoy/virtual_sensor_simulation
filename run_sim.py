@@ -21,7 +21,7 @@ class QueueCSVLogger:
         self.path = path
         self.queue = asyncio.Queue()
         self.file = open(path, "w", newline="", encoding="utf-8")
-        self.writer = CSVLogger(path)._writer  # <- fixed _writer
+        self.writer = CSVLogger(path)._writer
         self._task = None
         self._stopping = False
 
@@ -224,10 +224,10 @@ async def main():
             except asyncio.CancelledError:
                 print("⚠️ Some tasks were cancelled during shutdown.", flush=True)
 
-        # Stop logger safely with timeout
+        # Stop logger safely with enough timeout for all messages to flush
         if logger:
             try:
-                await asyncio.wait_for(logger.stop(), timeout=5)
+                await asyncio.wait_for(logger.stop(), timeout=20)  # Increased timeout from 5s → 20s
             except asyncio.TimeoutError:
                 print("⚠️ Logger did not finish in time, file may be partially written.", flush=True)
             except asyncio.CancelledError:
