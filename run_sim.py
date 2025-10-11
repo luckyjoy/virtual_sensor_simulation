@@ -1,4 +1,3 @@
-#run_sim.py
 import asyncio, argparse, random, os, sys, yaml, json
 from typing import List
 import aiomqtt
@@ -47,31 +46,6 @@ class SafeCSVLogger(CSVLogger):
             pass
 
 # ----------------------------
-# Safe VirtualSensor
-# ----------------------------
-class SafeVirtualSensor(VirtualSensor):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)  # ensures all parent methods exist
-        self._stopping = False
-
-    async def run(self, duration_s=0):
-        start = asyncio.get_event_loop().time()
-        while True:
-            now = asyncio.get_event_loop().time()
-            if duration_s and now - start >= duration_s:
-                break
-            payload = self.generate_payload()  # works now
-            if self.on_publish and not self._stopping:
-                try:
-                    await self.on_publish(payload)
-                except Exception:
-                    pass
-            await asyncio.sleep(self.next_interval())
-
-    def stop(self):
-        self._stopping = True
-
-# ----------------------------
 # CLI / main
 # ----------------------------
 def parse_args():
@@ -118,7 +92,8 @@ async def main():
     if args.config:
         cfg = load_config(args.config)
 
-    def C(path, default=None):
+    def get_config_value(path: str, default=None):
+        """Retrieve a nested value from the config dictionary using dot-separated keys."""
         cur = cfg
         for part in path.split("."):
             if isinstance(cur, dict) and part in cur:
@@ -127,58 +102,91 @@ async def main():
                 return default
         return cur
 
-    count = C("count", args.count)
-    rate = C("rate", args.rate)
-    jitter = C("jitter", args.jitter)
-    duration = C("duration", args.duration)
-    transport = C("transport", args.transport)
+    count = get_config_value("count", args.count)
+    rate = get_config_value("rate", args.rate)
+    jitter = get_config_value("jitter", args.jitter)
+    duration = get_config_value("duration", args.duration)
+    transport = get_config_value("transport", args.transport)
 
-    drop_rate = C("faults.drop_rate", args.drop_rate)
-    spike_rate = C("faults.spike_rate", args.spike_rate)
-    fault_every = C("faults.fault_every", args.fault_every)
+    drop_rate = get_config_value("faults.drop_rate", args.drop_rate)
+    spike_rate = get_config_value("faults.spike_rate", args.spike_rate)
+    fault_every = get_config_value("faults.fault_every", args.fault_every)
 
-    firmware = C("sensor.firmware", args.firmware)
-    battery_drain = C("sensor.battery_drain_pct_per_hour", args.battery_drain)
-    base_temp = C("sensor.value.base_temp_c", args.base_temp)
-    temp_sd = C("sensor.value.temp_noise_sd", args.temp_sd)
-    base_hum = C("sensor.value.base_humidity_pct", args.base_hum)
-    hum_sd = C("sensor.value.humidity_noise_sd", args.hum_sd)
-    log_csv = C("log_csv", args.log_csv)
+    firmware = get_config_value("sensor.firmware", args.firmware)
+    battery_drain = get_config_value("sensor.battery_drain_pct_per_hour", args.battery_drain)
+    base_temp = get_config_value("sensor.value.base_temp_c", args.base_temp)
+    temp_sd = get_config_value("sensor.value.temp_noise_sd", args.temp_sd)
+    base_hum = get_config_value("sensor.value.base_humidity_pct", args.base_hum)
+    hum_sd = get_config_value("sensor.value.humidity_noise_sd", args.hum_sd)
+    log_csv = get_config_value("log_csv", args.log_csv)
 
     # Transport
     if transport == "mqtt":
         mqtt_cfg = MQTTConfig(
-            host=C("mqtt.host", args.mqtt_host),
-            port=C("mqtt.port", args.mqtt_port),
-            username=C("mqtt.username", args.mqtt_username),
-            password=C("mqtt.password", args.mqtt_password),
-            qos=C("mqtt.qos", args.mqtt_qos),
-            topic_prefix=C("mqtt.topic_prefix", args.topic_prefix),
+            host=get_config_value("mqtt.host", args.mqtt_host),
+            port=get_config_value("mqtt.port", args.mqtt_port),
+            username=get_config_value("mqtt.username", args.mqtt_username),
+            password=get_config_value("mqtt.password", args.mqtt_password),
+            qos=get_config_value("mqtt.qos", args.mqtt_qos),
+            topic_prefix=get_config_value("mqtt.topic_prefix", args.topic_prefix),
         )
         tx_ctx = MQTTTransport(mqtt_cfg)
     else:
         http_cfg = HTTPConfig(
-            url=C("http.url", args.http_url),
-            timeout_s=C("http.timeout_s", args.http_timeout),
+            url=get_config_value("http.url", args.http_url),
+            timeout_s=get_config_value("http.timeout_s", args.http_timeout),
         )
         tx_ctx = HTTPTransport(http_cfg)
 
     logger = SafeCSVLogger(log_csv) if log_csv else None
 
-    # Sensors
-    sensors: List[SafeVirtualSensor] = []
+    # ----------------------------
+    # Create sensors
+    # ----------------------------
+    sensors: List[VirtualSensor] = []
     for i in range(count):
         sid = f"vs-{i:04d}"
         ident = SensorIdentity(sensor_id=sid, firmware=firmware, battery_pct=100.0)
         values = ValueModel(base_temp, temp_sd, base_hum, hum_sd)
         faults = FaultModel(drop_rate, spike_rate, fault_every)
-        s = SafeVirtualSensor(
+        s = VirtualSensor(
             identity=ident, value_model=values, fault_model=faults,
             rate_hz=rate, jitter_s=jitter, battery_drain_pct_per_hour=battery_drain,
             on_publish=None, logger=logger
         )
+
+        # Wrap run() to prevent publishing after stop
+        s._stopping = False
+        old_run = s.run
+
+        async def safe_run(duration_s=0, sensor=s):
+            start = asyncio.get_event_loop().time()
+            while True:
+                now = asyncio.get_event_loop().time()
+                if duration_s and now - start >= duration_s:
+                    break
+                payload = sensor.generate_payload()
+                if sensor.on_publish and not getattr(sensor, "_stopping", False):
+                    try:
+                        await sensor.on_publish(payload)
+                    except Exception:
+                        pass
+                await asyncio.sleep(sensor.next_interval())
+
+        s.run = safe_run
+
+        # Wrap stop() to set _stopping
+        old_stop = s.stop
+        def safe_stop(sensor=s):
+            sensor._stopping = True
+            old_stop()
+        s.stop = safe_stop
+
         sensors.append(s)
 
+    # ----------------------------
+    # Run simulation
+    # ----------------------------
     try:
         print(f"🚀 Starting simulation with {count} sensors via {transport.upper()}...", flush=True)
         async with tx_ctx as tx:
