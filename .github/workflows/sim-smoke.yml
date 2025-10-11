@@ -45,25 +45,25 @@ jobs:
           echo "Waiting for HTTP server to start on port 8080..."
           timeout=30 # Max wait time
           while ! python -c "
-import socket
-import sys
-try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('localhost', 8080))
-    s.close()
-    sys.exit(0)
-except socket.error:
-    sys.exit(1)
-          "; do
-              if [ $timeout -le 0 ]; then
-                  echo "Error: HTTP server failed to start within the timeout."
-                  cat server.log
-                  exit 1
-              fi
-              sleep 1
-              timeout=$((timeout - 1))
-          done
-          echo "HTTP server is ready."
+            import socket
+            import sys
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect(('localhost', 8080))
+                s.close()
+                sys.exit(0)
+            except socket.error:
+                sys.exit(1)
+                      "; do
+                          if [ $timeout -le 0 ]; then
+                              echo "Error: HTTP server failed to start within the timeout."
+                              cat server.log
+                              exit 1
+                          fi
+                          sleep 1
+                          timeout=$((timeout - 1))
+                      done
+                      echo "HTTP server is ready."
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
