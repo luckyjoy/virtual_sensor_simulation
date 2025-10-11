@@ -58,9 +58,9 @@ graph TD
     A["Virtual Sensors"] --> B["MQTT Broker (Mosquitto)"]
     B --> C["Subscribers / Consumers"]
     C --> D["Data Platform or Dashboard"]
+```
 
 ---
-
 
 ## 📁 Project Structure
 
