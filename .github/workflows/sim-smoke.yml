@@ -28,7 +28,6 @@ jobs:
       - name: Start HTTP collector in background
         id: start_server
         run: |
-          # Start server in background and save PID
           nohup python - <<'PY' > server.log 2>&1 &
           import asyncio
           from aiohttp import web
@@ -63,7 +62,18 @@ jobs:
             --http-url http://localhost:8080/ingest \
             --rate 2 --duration 30 --log-csv logs/out.csv
 
+      - name: Ensure logs are flushed before upload
+        if: always()
+        run: |
+          echo "Waiting a moment to ensure logs are fully written..."
+          sync
+          sleep 3
+          ls -lh logs || true
+          echo "Log file size:"
+          wc -c logs/out.csv || true
+
       - name: Upload CSV log artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sim-logs
