@@ -120,7 +120,9 @@ async def main():
     hum_sd = get_config_value("sensor.value.humidity_noise_sd", args.hum_sd)
     log_csv = get_config_value("log_csv", args.log_csv)
 
+    # ----------------------------
     # Transport
+    # ----------------------------
     if transport == "mqtt":
         mqtt_cfg = MQTTConfig(
             host=get_config_value("mqtt.host", args.mqtt_host),
@@ -168,10 +170,14 @@ async def main():
             async def safe_publish(payload):
                 nonlocal message_counter
                 try:
+                    if logger and logger._closed:
+                        return
                     await tx.publish(json.dumps(payload))
                     message_counter += 1
                     if message_counter % 100 == 0:
                         print(f"✅ Published {message_counter} messages", flush=True)
+                    if logger:
+                        logger.log(payload)
                 except Exception as e:
                     print(f"⚠️ Publish error: {e}", flush=True)
 
@@ -196,22 +202,25 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
-        # Stop all sensors
+        # ----------------------------
+        # Stop sensors first
+        # ----------------------------
         for s in sensors:
             s.stop()
 
-        # Cancel any remaining tasks
+        # ----------------------------
+        # Wait for all remaining tasks
+        # ----------------------------
         all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for t in all_tasks:
             t.cancel()
         await asyncio.gather(*all_tasks, return_exceptions=True)
 
+        # ----------------------------
         # Close logger last
+        # ----------------------------
         if logger:
-            try:
-                logger.close()
-            except Exception:
-                pass
+            logger.close()
 
         print("🛑 Simulation stopped gracefully.", flush=True)
 
