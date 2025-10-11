@@ -23,52 +23,41 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt aiohttp
+          pip install -r requirements.txt aiohttp pyyaml aiomqtt
 
       - name: Start HTTP collector (background) and Wait for Readiness
         run: |
-          # 1. Start the server detached
-          nohup python - <<'PY' > server.log 2>&1 < /dev/null &
-          import asyncio
-          from aiohttp import web
+          # 1. Start the aiohttp server in background (detached)
+          nohup python - <<'PY' > server.log 2>&1 &
+import asyncio
+from aiohttp import web
 
-          async def ingest(request):
-              data = await request.json()
-              return web.json_response({"ok": True})
+async def ingest(request):
+    data = await request.json()
+    return web.json_response({"ok": True})
 
-          app = web.Application()
-          app.add_routes([web.post('/ingest', ingest)])
-          web.run_app(app, port=8080)
-          PY
+app = web.Application()
+app.add_routes([web.post('/ingest', ingest)])
+web.run_app(app, port=8080)
+PY
 
-          # 2. Write the socket check script to a temp file using a robust heredoc.
-          # The closing 'EOF' must be left-aligned within this 'run' block to avoid YAML errors.
+          # 2. Create a small port-check script
           cat > wait_for_port.py <<'EOF'
-import socket
-import sys
-try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('localhost', 8080))
-    s.close()
-    sys.exit(0)
-except socket.error:
-    sys.exit(1)
+import socket, time
+for i in range(30):  # 30 seconds max wait
+    try:
+        s = socket.create_connection(('localhost', 8080), timeout=1)
+        s.close()
+        print("HTTP server ready")
+        exit(0)
+    except OSError:
+        time.sleep(1)
+print("Server not responding after 30s")
+exit(1)
 EOF
-          
-          # 3. Use the temp file in the robust wait/poll loop
-          echo "Waiting for HTTP server to start on port 8080..."
-          timeout=30 # Max wait time
-          while ! python wait_for_port.py
-          do
-              if [ $timeout -le 0 ]; then
-                  echo "Error: HTTP server failed to start within the timeout."
-                  cat server.log
-                  exit 1
-              fi
-              sleep 1
-              timeout=$((timeout - 1))
-          done
-          echo "HTTP server is ready."
+
+          # 3. Wait until server is ready
+          python wait_for_port.py
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
