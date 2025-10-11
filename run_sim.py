@@ -171,7 +171,7 @@ async def main():
                 nonlocal message_counter
                 try:
                     if logger and logger._closed:
-                        return
+                        return  # skip writes after close
                     await tx.publish(json.dumps(payload))
                     message_counter += 1
                     if message_counter % 100 == 0:
@@ -202,23 +202,16 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
-        # ----------------------------
-        # Stop sensors first
-        # ----------------------------
+        # Stop all sensors first
         for s in sensors:
             s.stop()
 
-        # ----------------------------
-        # Wait for all remaining tasks
-        # ----------------------------
-        all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for t in all_tasks:
-            t.cancel()
-        await asyncio.gather(*all_tasks, return_exceptions=True)
+        # Wait for all remaining tasks to finish
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-        # ----------------------------
         # Close logger last
-        # ----------------------------
         if logger:
             logger.close()
 
