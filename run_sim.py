@@ -13,13 +13,25 @@ from sensor_sim.transports import (
     MQTTTransport, MQTTConfig, HTTPTransport, HTTPConfig
 )
 
-# 🩵 Patch CSVLogger to ignore writes after close
+# 🩵 Fully async-safe CSVLogger
 class SafeCSVLogger(CSVLogger):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._closed = False
+
     def log(self, record):
+        if self._closed:
+            return  # ignore writes after close
         try:
             super().log(record)
-        except (ValueError, RuntimeError):
-            # File closed or invalid state, safe to ignore
+        except Exception:
+            pass
+
+    def close(self):
+        self._closed = True
+        try:
+            super().close()
+        except Exception:
             pass
 
 def parse_args():
@@ -110,7 +122,6 @@ async def main():
         )
         tx_ctx = HTTPTransport(http_cfg)
 
-    # Use SafeCSVLogger instead of plain CSVLogger
     logger = SafeCSVLogger(log_csv) if log_csv else None
 
     sensors: List[VirtualSensor] = []
@@ -150,10 +161,7 @@ async def main():
                         pass
                 s.on_publish = safe_publish
 
-            # Start all sensors
             tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
-
-            # Wait for all tasks to complete
             await asyncio.gather(*tasks)
 
         print("✅ Simulation completed successfully.", flush=True)
@@ -169,11 +177,11 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
-        # Stop all sensors
+        # Stop sensors
         for s in sensors:
             s.stop()
 
-        # Wait for all remaining tasks to finish safely
+        # Cancel all pending tasks
         all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for t in all_tasks:
             t.cancel()
@@ -188,7 +196,7 @@ async def main():
                 except Exception:
                     pass
 
-        # Close CSV logger last
+        # Close logger last
         if logger:
             try:
                 logger.close()
