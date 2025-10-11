@@ -2,7 +2,7 @@ import asyncio, argparse, random, os, sys, yaml, json
 from typing import List
 import aiomqtt
 
-# On Windows, use the SelectorEventLoop
+# On Windows, use SelectorEventLoop
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -31,7 +31,6 @@ class SafeCSVLogger(CSVLogger):
                 pass
 
     def log(self, record):
-        # fallback for sync calls
         try:
             asyncio.run(self.log_async(record))
         except Exception:
@@ -44,7 +43,28 @@ class SafeCSVLogger(CSVLogger):
         except Exception:
             pass
 
+# Patched VirtualSensor to stop publishing after stop()
+class SafeVirtualSensor(VirtualSensor):
+    async def run(self, duration_s=0):
+        start = asyncio.get_event_loop().time()
+        while True:
+            now = asyncio.get_event_loop().time()
+            if duration_s and now - start >= duration_s:
+                break
+            payload = self.generate_payload()
+            if self.on_publish and not getattr(self, "_stopping", False):
+                try:
+                    await self.on_publish(payload)
+                except Exception:
+                    pass
+            await asyncio.sleep(self.next_interval())
 
+    def stop(self):
+        self._stopping = True
+
+# ----------------------------
+# CLI / main
+# ----------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Virtual Sensor Simulator")
     p.add_argument("--config", type=str, default="", help="Path to YAML config")
@@ -116,6 +136,7 @@ async def main():
     hum_sd = C("sensor.value.humidity_noise_sd", args.hum_sd)
     log_csv = C("log_csv", args.log_csv)
 
+    # Transport
     if transport == "mqtt":
         mqtt_cfg = MQTTConfig(
             host=C("mqtt.host", args.mqtt_host),
@@ -135,13 +156,14 @@ async def main():
 
     logger = SafeCSVLogger(log_csv) if log_csv else None
 
-    sensors: List[VirtualSensor] = []
+    # Sensors
+    sensors: List[SafeVirtualSensor] = []
     for i in range(count):
         sid = f"vs-{i:04d}"
         ident = SensorIdentity(sensor_id=sid, firmware=firmware, battery_pct=100.0)
         values = ValueModel(base_temp, temp_sd, base_hum, hum_sd)
         faults = FaultModel(drop_rate, spike_rate, fault_every)
-        s = VirtualSensor(
+        s = SafeVirtualSensor(
             identity=ident, value_model=values, fault_model=faults,
             rate_hz=rate, jitter_s=jitter, battery_drain_pct_per_hour=battery_drain,
             on_publish=None, logger=logger
@@ -192,7 +214,7 @@ async def main():
         for s in sensors:
             s.stop()
 
-        # Cancel all pending tasks
+        # Cancel and await all tasks
         all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for t in all_tasks:
             t.cancel()
@@ -207,7 +229,7 @@ async def main():
                 except Exception:
                     pass
 
-        # Close logger **after all tasks are done**
+        # Close logger last
         if logger:
             try:
                 logger.close()
