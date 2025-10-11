@@ -1,4 +1,3 @@
-#run_sim.py
 import asyncio, argparse, os, sys, yaml, json
 from typing import List
 import aiomqtt
@@ -181,11 +180,9 @@ async def main():
                 except Exception as e:
                     print(f"⚠️ Publish error: {e}", flush=True)
 
-            # Assign the safe_publish callback
             for s in sensors:
                 s.on_publish = safe_publish
 
-            # Run all sensors
             tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
             await asyncio.gather(*tasks)
 
@@ -199,18 +196,33 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
+        # ----------------------------
         # Stop sensors first
+        # ----------------------------
         for s in sensors:
             s.stop()
 
-        # Wait for remaining sensor tasks
+        # ----------------------------
+        # Wait for remaining tasks with timeout
+        # ----------------------------
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=5  # 5 seconds max
+                )
+            except asyncio.TimeoutError:
+                print("⚠️ Some tasks did not finish within timeout, proceeding with shutdown.", flush=True)
 
-        # Stop logger last
+        # ----------------------------
+        # Stop logger last with timeout
+        # ----------------------------
         if logger:
-            await logger.stop()
+            try:
+                await asyncio.wait_for(logger.stop(), timeout=5)
+            except asyncio.TimeoutError:
+                print("⚠️ Logger did not finish in time, file may be partially written.", flush=True)
 
         print("🛑 Simulation stopped gracefully.", flush=True)
 
