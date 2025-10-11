@@ -1,4 +1,3 @@
-#run_sim.py
 import asyncio, argparse, os, sys, yaml, json
 from typing import List
 import aiomqtt
@@ -15,36 +14,41 @@ from sensor_sim.transports import (
 )
 
 # ----------------------------
-# Async-safe CSV Logger
+# Safe async CSV writer
 # ----------------------------
-class SafeCSVLogger(CSVLogger):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._closed = False
-        self._lock = asyncio.Lock()
+class QueueCSVLogger:
+    def __init__(self, path):
+        self.path = path
+        self.queue = asyncio.Queue()
+        self.file = open(path, "w", newline="", encoding="utf-8")
+        self.writer = CSVLogger(path).writer  # reuse CSV writer
+        self._task = None
 
-    async def log_async(self, record):
-        async with self._lock:
-            if self._closed:
-                return
+    async def start(self):
+        self._task = asyncio.create_task(self._writer())
+
+    async def _writer(self):
+        while True:
+            payload = await self.queue.get()
+            if payload is None:
+                break
             try:
-                self.writer.writerow(record)
+                self.writer.writerow(payload)
                 self.file.flush()
             except Exception:
                 pass
+            self.queue.task_done()
 
-    def log(self, record):
-        try:
-            asyncio.run(self.log_async(record))
-        except Exception:
-            pass
+    async def log(self, payload):
+        await self.queue.put(payload)
 
-    def close(self):
-        self._closed = True
-        try:
-            super().close()
-        except Exception:
-            pass
+    async def stop(self):
+        await self.queue.join()
+        await self.queue.put(None)
+        if self._task:
+            await self._task
+        self.file.close()
+
 
 # ----------------------------
 # CLI / main
@@ -140,7 +144,9 @@ async def main():
         )
         tx_ctx = HTTPTransport(http_cfg)
 
-    logger = SafeCSVLogger(log_csv) if log_csv else None
+    logger = QueueCSVLogger(log_csv) if log_csv else None
+    if logger:
+        await logger.start()
 
     # ----------------------------
     # Create sensors
@@ -154,34 +160,28 @@ async def main():
         s = VirtualSensor(
             identity=ident, value_model=values, fault_model=faults,
             rate_hz=rate, jitter_s=jitter, battery_drain_pct_per_hour=battery_drain,
-            on_publish=None, logger=logger
+            on_publish=None, logger=None  # we handle logging separately
         )
         sensors.append(s)
 
-    # ----------------------------
-    # Run simulation
-    # ----------------------------
     try:
         print(f"🚀 Starting simulation with {count} sensors via {transport.upper()}...", flush=True)
         async with tx_ctx as tx:
             message_counter = 0
 
-            # Safe on_publish callback
             async def safe_publish(payload):
                 nonlocal message_counter
                 try:
-                    if logger and logger._closed:
-                        return
                     await tx.publish(json.dumps(payload))
                     message_counter += 1
                     if message_counter % 100 == 0:
                         print(f"✅ Published {message_counter} messages", flush=True)
                     if logger:
-                        logger.log(payload)
+                        await logger.log(payload)
                 except Exception as e:
                     print(f"⚠️ Publish error: {e}", flush=True)
 
-            # Assign safe_publish to each sensor
+            # Assign the safe_publish callback
             for s in sensors:
                 s.on_publish = safe_publish
 
@@ -192,9 +192,6 @@ async def main():
         print("✅ Simulation completed successfully.", flush=True)
         return 0
 
-    except aiomqtt.exceptions.MqttError as e:
-        print(f"❌ MQTT connection failed: {e}", flush=True)
-        return 1
     except Exception as e:
         print(f"❌ Unexpected error: {e}", flush=True)
         return 1
@@ -202,24 +199,18 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
-        # ----------------------------
-        # 1️⃣ Stop all sensors first
-        # ----------------------------
+        # Stop sensors first
         for s in sensors:
             s.stop()
 
-        # ----------------------------
-        # 2️⃣ Wait for all remaining sensor tasks
-        # ----------------------------
+        # Wait for remaining sensor tasks
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        # ----------------------------
-        # 3️⃣ Close logger last
-        # ----------------------------
+        # Stop logger last
         if logger:
-            logger.close()
+            await logger.stop()
 
         print("🛑 Simulation stopped gracefully.", flush=True)
 
