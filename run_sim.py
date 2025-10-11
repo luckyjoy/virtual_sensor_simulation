@@ -21,7 +21,6 @@ def parse_args():
     p.add_argument("--jitter", type=float, default=0.2, help="Seconds of +/- jitter per publish")
     p.add_argument("--duration", type=int, default=0, help="Seconds to run (0 = infinite)")
     p.add_argument("--transport", choices=["mqtt", "http"], default="mqtt")
-
     # MQTT
     p.add_argument("--mqtt-host", type=str, default="localhost")
     p.add_argument("--mqtt-port", type=int, default=1883)
@@ -29,16 +28,13 @@ def parse_args():
     p.add_argument("--mqtt-password", type=str, default="")
     p.add_argument("--mqtt-qos", type=int, default=0)
     p.add_argument("--topic-prefix", type=str, default="sim/sensors")
-
     # HTTP
     p.add_argument("--http-url", type=str, default="http://localhost:8080/ingest")
     p.add_argument("--http-timeout", type=int, default=10)
-
     # Faults
     p.add_argument("--drop-rate", type=float, default=0.0)
     p.add_argument("--spike-rate", type=float, default=0.0)
     p.add_argument("--fault-every", type=int, default=0)
-
     # Model
     p.add_argument("--firmware", type=str, default="1.2.3")
     p.add_argument("--battery-drain", type=float, default=0.5)
@@ -46,7 +42,6 @@ def parse_args():
     p.add_argument("--temp-sd", type=float, default=0.8)
     p.add_argument("--base-hum", type=float, default=40.0)
     p.add_argument("--hum-sd", type=float, default=3.0)
-
     p.add_argument("--log-csv", type=str, default="")
     return p.parse_args()
 
@@ -62,7 +57,6 @@ async def main():
     if args.config:
         cfg = load_config(args.config)
 
-    # Helper to resolve nested config paths
     def C(path, default=None):
         cur = cfg
         for part in path.split("."):
@@ -90,7 +84,6 @@ async def main():
     hum_sd = C("sensor.value.humidity_noise_sd", args.hum_sd)
     log_csv = C("log_csv", args.log_csv)
 
-    # Build transport
     if transport == "mqtt":
         mqtt_cfg = MQTTConfig(
             host=C("mqtt.host", args.mqtt_host),
@@ -110,7 +103,6 @@ async def main():
 
     logger = CSVLogger(log_csv) if log_csv else None
 
-    # Create sensors
     sensors: List[VirtualSensor] = []
     for i in range(count):
         sid = f"vs-{i:04d}"
@@ -138,12 +130,22 @@ async def main():
                         print(f"✅ Published {message_counter} messages", flush=True)
                     await asyncio.sleep(0.001)
                 except Exception as e:
+                    # 🩵 Safe publish wrapper: ignore closed sessions/logs
                     print(f"⚠️ Publish error: {e}", flush=True)
 
             for s in sensors:
-                s.on_publish = publish
+                # 🩵 Wrap publish safely
+                async def safe_publish(payload, pub=publish):
+                    try:
+                        await pub(payload)
+                    except Exception:
+                        pass
+                s.on_publish = safe_publish
 
+            # Start all sensors
             tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
+
+            # Wait for all tasks to complete
             await asyncio.gather(*tasks)
 
         print("✅ Simulation completed successfully.", flush=True)
@@ -156,16 +158,20 @@ async def main():
         print(f"❌ Unexpected error: {e}", flush=True)
         return 1
 
-    # 🩵 FIX: make cleanup fully async-safe and graceful
     finally:
         print("🧹 Cleaning up...", flush=True)
+
+        # Stop sensors first
         for s in sensors:
             s.stop()
 
-        # Give pending HTTP publishes time to finish
-        await asyncio.sleep(1.0)
+        # Cancel any remaining tasks
+        all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for t in all_tasks:
+            t.cancel()
+        await asyncio.gather(*all_tasks, return_exceptions=True)
 
-        # Gracefully close any aiohttp sessions (for HTTP transport)
+        # Close transport/session
         for s in sensors:
             session = getattr(s, "session", None)
             if session and hasattr(session, "close") and not session.closed:
@@ -174,7 +180,7 @@ async def main():
                 except Exception:
                     pass
 
-        # Close the logger properly
+        # Close CSV logger
         if logger and hasattr(logger, "close"):
             try:
                 logger.close()
