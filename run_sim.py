@@ -1,4 +1,4 @@
-import asyncio, argparse, random, os, sys, yaml, json
+import asyncio, argparse, os, sys, yaml, json
 from typing import List
 import aiomqtt
 
@@ -154,34 +154,6 @@ async def main():
             rate_hz=rate, jitter_s=jitter, battery_drain_pct_per_hour=battery_drain,
             on_publish=None, logger=logger
         )
-
-        # Wrap run() to prevent publishing after stop
-        s._stopping = False
-        old_run = s.run
-
-        async def safe_run(duration_s=0, sensor=s):
-            start = asyncio.get_event_loop().time()
-            while True:
-                now = asyncio.get_event_loop().time()
-                if duration_s and now - start >= duration_s:
-                    break
-                payload = sensor.generate_payload()
-                if sensor.on_publish and not getattr(sensor, "_stopping", False):
-                    try:
-                        await sensor.on_publish(payload)
-                    except Exception:
-                        pass
-                await asyncio.sleep(sensor.next_interval())
-
-        s.run = safe_run
-
-        # Wrap stop() to set _stopping
-        old_stop = s.stop
-        def safe_stop(sensor=s):
-            sensor._stopping = True
-            old_stop()
-        s.stop = safe_stop
-
         sensors.append(s)
 
     # ----------------------------
@@ -192,25 +164,22 @@ async def main():
         async with tx_ctx as tx:
             message_counter = 0
 
-            async def publish(payload):
+            # Safe on_publish callback
+            async def safe_publish(payload):
                 nonlocal message_counter
                 try:
                     await tx.publish(json.dumps(payload))
                     message_counter += 1
                     if message_counter % 100 == 0:
                         print(f"✅ Published {message_counter} messages", flush=True)
-                    await asyncio.sleep(0.001)
                 except Exception as e:
                     print(f"⚠️ Publish error: {e}", flush=True)
 
+            # Assign safe_publish to each sensor
             for s in sensors:
-                async def safe_publish(payload, pub=publish):
-                    try:
-                        await pub(payload)
-                    except Exception:
-                        pass
                 s.on_publish = safe_publish
 
+            # Run all sensors
             tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
             await asyncio.gather(*tasks)
 
@@ -227,24 +196,15 @@ async def main():
     finally:
         print("🧹 Cleaning up...", flush=True)
 
-        # Stop sensors
+        # Stop all sensors
         for s in sensors:
             s.stop()
 
-        # Cancel and await all tasks
+        # Cancel any remaining tasks
         all_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for t in all_tasks:
             t.cancel()
         await asyncio.gather(*all_tasks, return_exceptions=True)
-
-        # Close transport/session safely
-        for s in sensors:
-            session = getattr(s, "session", None)
-            if session and hasattr(session, "close") and not session.closed:
-                try:
-                    await session.close()
-                except Exception:
-                    pass
 
         # Close logger last
         if logger:
