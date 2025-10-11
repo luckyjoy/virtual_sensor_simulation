@@ -41,9 +41,8 @@ jobs:
           web.run_app(app, port=8080)
           PY
 
-          # 2. Write the socket check script to a temp file
-          cat <<'EOF' > wait_for_port.py
-import socket
+          # 2. Write the socket check script to a temp file using a robust single-line echo
+          echo "import socket
 import sys
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -51,8 +50,7 @@ try:
     s.close()
     sys.exit(0)
 except socket.error:
-    sys.exit(1)
-EOF
+    sys.exit(1)" > wait_for_port.py
           
           # 3. Use the temp file in the robust wait/poll loop
           echo "Waiting for HTTP server to start on port 8080..."
