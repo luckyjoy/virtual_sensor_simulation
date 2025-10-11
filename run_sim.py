@@ -21,13 +21,13 @@ class QueueCSVLogger:
         self.path = path
         self.queue = asyncio.Queue()
         self.file = open(path, "w", newline="", encoding="utf-8")
-        self.writer = CSVLogger(path).writer  # reuse CSV writer
+        self.writer = CSVLogger(path)._writer  # <- fixed _writer
         self._task = None
 
     async def start(self):
-        self._task = asyncio.create_task(self._writer())
+        self._task = asyncio.create_task(self._writer_task())
 
-    async def _writer(self):
+    async def _writer_task(self):
         while True:
             payload = await self.queue.get()
             if payload is None:
@@ -48,7 +48,6 @@ class QueueCSVLogger:
         if self._task:
             await self._task
         self.file.close()
-
 
 # ----------------------------
 # CLI / main
@@ -160,7 +159,7 @@ async def main():
         s = VirtualSensor(
             identity=ident, value_model=values, fault_model=faults,
             rate_hz=rate, jitter_s=jitter, battery_drain_pct_per_hour=battery_drain,
-            on_publish=None, logger=None  # we handle logging separately
+            on_publish=None, logger=None
         )
         sensors.append(s)
 
