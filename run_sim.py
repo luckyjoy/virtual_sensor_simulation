@@ -1,3 +1,8 @@
+# FILENAME: run_sim.py
+# PURPOSE:  Simulates a large number of concurrent virtual sensors, generating
+#           time-series data (temp, humidity, battery) with optional faults (spikes, drops).
+#           Data is published asynchronously via MQTT (default) or HTTP, and optionally logged to CSV.
+
 import asyncio, argparse, os, sys, yaml, json, csv, time
 from typing import List
 import aiomqtt
@@ -14,7 +19,7 @@ from sensor_sim.transports import (
 )
 
 # ============================================================
-# Reliable async CSV writer with graceful shutdown
+# Optimized Async CSV writer with non-blocking I/O (PERFORMANCE FIX)
 # ============================================================
 class QueueCSVLogger:
     def __init__(self, path):
@@ -25,10 +30,14 @@ class QueueCSVLogger:
             self.file,
             fieldnames=["sensor_id", "timestamp", "temperature", "humidity", "battery_pct"],
         )
+        # Use writerows for initial header to match later batching style (optional but clean)
         self.writer.writeheader()
         self._task = None
         self._stopping = False
         self._count = 0
+        # Performance improvement: buffer records to write in large batches
+        self._buffer = [] 
+        self._WRITE_THRESHOLD = 1000 # Write to disk every 1000 records
 
     async def start(self):
         self._task = asyncio.create_task(self._writer_task())
@@ -37,36 +46,62 @@ class QueueCSVLogger:
         """Continuously drain the async queue and write to CSV."""
         while True:
             try:
-                payload = await asyncio.wait_for(self.queue.get(), timeout=1)
+                # Use a short timeout to check the stopping flag periodically
+                payload = await asyncio.wait_for(self.queue.get(), timeout=0.1)
             except asyncio.TimeoutError:
+                # If stopping and queue is empty, flush any buffer and break.
                 if self._stopping and self.queue.empty():
+                    if self._buffer:
+                        await self._write_buffer_to_disk()
                     break
+                # If timed out but buffer has data, flush the buffer
+                if self._buffer:
+                    await self._write_buffer_to_disk()
                 continue
 
             if payload is None:
                 break
 
-            try:
-                if isinstance(payload, dict):
-                    self.writer.writerow(payload)
-                    self._count += 1
-                self.file.flush()
-            except Exception as e:
-                print(f"⚠️ CSV write error: {e}", flush=True)
+            if isinstance(payload, dict):
+                self._buffer.append(payload)
+                self._count += 1
+            
+            # Flush the buffer if the threshold is met
+            if len(self._buffer) >= self._WRITE_THRESHOLD:
+                await self._write_buffer_to_disk()
 
             self.queue.task_done()
 
         print(f"🧾 Logger wrote {self._count} rows to {self.path}", flush=True)
 
+    async def _write_buffer_to_disk(self):
+        """Performs the blocking I/O operation in a separate thread."""
+        if not self._buffer:
+            return
+
+        try:
+            # Use asyncio.to_thread for the blocking writerows and flush
+            await asyncio.to_thread(self.writer.writerows, self._buffer)
+            await asyncio.to_thread(self.file.flush)
+        except Exception as e:
+            print(f"⚠️ CSV batch write error: {e}", flush=True)
+        
+        self._buffer.clear()
+        
     async def log(self, payload):
         await self.queue.put(payload)
 
     async def stop(self):
         self._stopping = True
         await self.queue.join()
+        # Ensure final flush after joining the queue
+        if self._buffer:
+             await self._write_buffer_to_disk()
+        
         await self.queue.put(None)
         if self._task:
-            await asyncio.shield(self._task)
+            # Shield ensures the task runs to completion
+            await asyncio.shield(self._task) 
         self.file.close()
 
 
@@ -223,6 +258,7 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # Performance improvement: Install and use uvloop for the event loop
         import uvloop
         uvloop.install()
     except Exception:

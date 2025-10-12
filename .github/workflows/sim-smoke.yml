@@ -23,12 +23,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt aiohttp
+          # Performance improvement: Install uvloop for faster event loop
+          pip install -r requirements.txt aiohttp uvloop
 
       - name: Start HTTP collector in background
         id: start_server
         run: |
+          # Performance improvement: Use uvloop to run the aiohttp server
           nohup python - <<'PY' > server.log 2>&1 &
+          try:
+              import uvloop
+              uvloop.install()
+          except ImportError:
+              pass
+              
           import asyncio
           from aiohttp import web
 
@@ -62,13 +70,34 @@ jobs:
             --http-url http://localhost:8080/ingest \
             --rate 2 --duration 30 --log-csv logs/out.csv
 
-      - name: Check CSV output before upload
+      - name: Check CSV output directory
         if: always()
         run: |
-          echo "Checking CSV file contents..."
+          echo "Checking logs directory contents..."
           ls -lh logs
-          head -n 10 logs/out.csv || echo "⚠️ out.csv is empty"
           
+      - name: Verify CSV has at least 20 data lines
+        run: |
+          CSV_FILE="logs/out.csv"
+          # Get total lines (header + data)
+          TOTAL_LINES=$(wc -l < "$CSV_FILE" | tr -d ' ')
+          # Data lines = Total lines - 1 (for the header)
+          DATA_LINES=$((TOTAL_LINES - 1))
+          
+          echo "Total lines in CSV (including header): $TOTAL_LINES"
+          echo "Data lines (excluding header): $DATA_LINES"
+          
+          MIN_REQUIRED_LINES=20
+          
+          if [ "$DATA_LINES" -ge "$MIN_REQUIRED_LINES" ]; then
+              echo "✅ Success: CSV contains $DATA_LINES data lines, which is >= $MIN_REQUIRED_LINES."
+          else
+              echo "❌ Failure: CSV contains only $DATA_LINES data lines. Expected at least $MIN_REQUIRED_LINES."
+              # Print the first 10 lines for debugging if the check fails
+              head -n 10 "$CSV_FILE"
+              exit 1
+          fi
+
       - name: Ensure logs are flushed before upload
         if: always()
         run: |
