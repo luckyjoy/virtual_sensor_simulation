@@ -24,7 +24,7 @@ from sensor_sim.transports import (
 class QueueCSVLogger:
     def __init__(self, path):
         self.path = path
-        # Ensure the directory exists before opening the file
+        # FIX: Ensure the directory exists before opening the file
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.queue = asyncio.Queue()
         self.file = open(path, "w", newline="", encoding="utf-8")
@@ -46,7 +46,7 @@ class QueueCSVLogger:
         while True:
             payload = await self.queue.get()
 
-            # A 'None' payload is the sentinel signal to shut down
+            # FIX: A 'None' payload is the sentinel signal to shut down cleanly
             if payload is None:
                 if self._buffer:
                     await self._write_buffer_to_disk()
@@ -78,7 +78,7 @@ class QueueCSVLogger:
         await self.queue.put(payload)
 
     async def stop(self):
-        """Signal the writer to shut down and wait for it to finish."""
+        """FIX: Signal the writer to shut down and wait for it to finish."""
         if self._task:
             # Send the sentinel to the queue
             await self.queue.put(None)
@@ -87,6 +87,7 @@ class QueueCSVLogger:
             # Wait for the writer task to exit cleanly
             await self._task
         self.file.close()
+
 
 # ============================================================
 # CLI / Config helpers
