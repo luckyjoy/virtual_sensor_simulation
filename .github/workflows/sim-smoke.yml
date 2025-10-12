@@ -62,6 +62,7 @@ jobs:
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
+          # Create logs directory before running the script
           mkdir -p logs
           python run_sim.py --count 20 --transport http \
             --http-url http://localhost:8080/ingest \

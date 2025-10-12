@@ -9,6 +9,7 @@ except ImportError:
 
 async def ingest(request):
     try:
+        # Read the request data, but don't do anything synchronous that blocks the loop
         data = await request.json()
     except Exception:
         data = None
