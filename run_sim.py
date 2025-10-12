@@ -24,20 +24,19 @@ from sensor_sim.transports import (
 class QueueCSVLogger:
     def __init__(self, path):
         self.path = path
+        # Ensure the directory exists before opening the file
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         self.queue = asyncio.Queue()
         self.file = open(path, "w", newline="", encoding="utf-8")
         self.writer = csv.DictWriter(
             self.file,
             fieldnames=["sensor_id", "timestamp", "temperature", "humidity", "battery_pct"],
         )
-        # Use writerows for initial header to match later batching style (optional but clean)
         self.writer.writeheader()
         self._task = None
-        self._stopping = False
         self._count = 0
-        # Performance improvement: buffer records to write in large batches
-        self._buffer = [] 
-        self._WRITE_THRESHOLD = 1000 # Write to disk every 1000 records
+        self._buffer = []
+        self._WRITE_THRESHOLD = 1000
 
     async def start(self):
         self._task = asyncio.create_task(self._writer_task())
@@ -45,28 +44,18 @@ class QueueCSVLogger:
     async def _writer_task(self):
         """Continuously drain the async queue and write to CSV."""
         while True:
-            try:
-                # Use a short timeout to check the stopping flag periodically
-                payload = await asyncio.wait_for(self.queue.get(), timeout=0.1)
-            except asyncio.TimeoutError:
-                # If stopping and queue is empty, flush any buffer and break.
-                if self._stopping and self.queue.empty():
-                    if self._buffer:
-                        await self._write_buffer_to_disk()
-                    break
-                # If timed out but buffer has data, flush the buffer
+            payload = await self.queue.get()
+
+            # A 'None' payload is the sentinel signal to shut down
+            if payload is None:
                 if self._buffer:
                     await self._write_buffer_to_disk()
-                continue
-
-            if payload is None:
+                self.queue.task_done()
                 break
 
-            if isinstance(payload, dict):
-                self._buffer.append(payload)
-                self._count += 1
-            
-            # Flush the buffer if the threshold is met
+            self._buffer.append(payload)
+            self._count += 1
+
             if len(self._buffer) >= self._WRITE_THRESHOLD:
                 await self._write_buffer_to_disk()
 
@@ -78,32 +67,26 @@ class QueueCSVLogger:
         """Performs the blocking I/O operation in a separate thread."""
         if not self._buffer:
             return
-
         try:
-            # Use asyncio.to_thread for the blocking writerows and flush
             await asyncio.to_thread(self.writer.writerows, self._buffer)
             await asyncio.to_thread(self.file.flush)
         except Exception as e:
             print(f"⚠️ CSV batch write error: {e}", flush=True)
-        
         self._buffer.clear()
-        
+
     async def log(self, payload):
         await self.queue.put(payload)
 
     async def stop(self):
-        self._stopping = True
-        await self.queue.join()
-        # Ensure final flush after joining the queue
-        if self._buffer:
-             await self._write_buffer_to_disk()
-        
-        await self.queue.put(None)
+        """Signal the writer to shut down and wait for it to finish."""
         if self._task:
-            # Shield ensures the task runs to completion
-            await asyncio.shield(self._task) 
+            # Send the sentinel to the queue
+            await self.queue.put(None)
+            # Wait for the queue to be fully processed
+            await self.queue.join()
+            # Wait for the writer task to exit cleanly
+            await self._task
         self.file.close()
-
 
 # ============================================================
 # CLI / Config helpers

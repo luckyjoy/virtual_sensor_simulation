@@ -23,47 +23,42 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Ensure uvloop is installed for stability and performance
           pip install -r requirements.txt aiohttp uvloop
 
-      - name: Start HTTP collector in background
+      - name: Start server and wait for readiness
         id: start_server
         run: |
-          # FIX: Run the stable server.py file directly for robust background execution
-          # This replaces the unstable inline Python block.
+          # Start the server in the background, logging its output
           nohup python server.py > server.log 2>&1 &
           echo $! > server.pid
           echo "Server PID: $(cat server.pid)"
-
-      - name: Wait for HTTP server readiness (Robust Check)
-        run: |
+          
           echo "Waiting for HTTP server on port 8080..."
           
+          # Loop for up to 30 seconds, checking for a successful response
           for i in {1..10}; do
-              # FIX: Use curl to verify the actual /ingest application endpoint is responding with 200 OK
+              # Use curl to verify the ingest endpoint is responding with 200 OK
               HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ingest -X POST -H "Content-Type: application/json" -d '{"test": 1}')
               
               if [ "$HTTP_CODE" -eq 200 ]; then
-                  echo "HTTP server is ready! Status: $HTTP_CODE"
-                  break
+                  echo "✅ HTTP server is ready! Status: $HTTP_CODE"
+                  exit 0 # Exit successfully from this script
               fi
               echo "Server not ready (Status: $HTTP_CODE). Waiting $i/10..."
               sleep 3
           done
           
-          # Final check and log dump if still failing
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ingest -X POST -H "Content-Type: application/json" -d '{"test": 1}')
-          if ! [ "$HTTP_CODE" -eq 200 ]; then
-              echo "❌ Server failed to start or respond. Status: $HTTP_CODE"
-              echo "--- Server Log (server.log) ---"
-              cat server.log
-              echo "---------------------------"
-              exit 1
-          fi
+          # If the loop finishes without success, fail the workflow
+          echo "❌ Server failed to start or respond after 30 seconds."
+          echo "--- Server Log (server.log) ---"
+          cat server.log
+          echo "---------------------------"
+          exit 1
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
-          # Ensure the logs directory is created before the python script runs
+          # The corrected python script will create the 'logs' directory,
+          # but creating it here is a good defensive practice.
           mkdir -p logs
           python run_sim.py --count 20 --transport http \
             --http-url http://localhost:8080/ingest \
@@ -74,7 +69,7 @@ jobs:
         run: |
           echo "Checking logs directory contents..."
           ls -lh logs
-          
+
       - name: Verify CSV has at least 20 data lines
         run: |
           CSV_FILE="logs/out.csv"
