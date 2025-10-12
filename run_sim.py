@@ -1,4 +1,4 @@
-import asyncio, argparse, os, sys, yaml, json
+import asyncio, argparse, os, sys, yaml, json, csv
 from typing import List
 import aiomqtt
 
@@ -7,21 +7,34 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from sensor_sim.sensor import (
-    VirtualSensor, SensorIdentity, FaultModel, ValueModel, CSVLogger
+    VirtualSensor, SensorIdentity, FaultModel, ValueModel
 )
 from sensor_sim.transports import (
     MQTTTransport, MQTTConfig, HTTPTransport, HTTPConfig
 )
 
-# ----------------------------
-# Safe async CSV writer
-# ----------------------------
+# ============================================================
+# Safe async CSV writer that actually writes to the right file
+# ============================================================
 class QueueCSVLogger:
     def __init__(self, path):
         self.path = path
         self.queue = asyncio.Queue()
         self.file = open(path, "w", newline="", encoding="utf-8")
-        self.writer = CSVLogger(path)._writer
+
+        # ✅ Use DictWriter to log consistent sensor data
+        self.writer = csv.DictWriter(
+            self.file,
+            fieldnames=[
+                "sensor_id",
+                "timestamp",
+                "temperature",
+                "humidity",
+                "battery_pct",
+            ],
+        )
+        self.writer.writeheader()
+
         self._task = None
         self._stopping = False
 
@@ -29,6 +42,7 @@ class QueueCSVLogger:
         self._task = asyncio.create_task(self._writer_task())
 
     async def _writer_task(self):
+        """Continuously drain the async queue and write to CSV."""
         while True:
             try:
                 payload = await asyncio.wait_for(self.queue.get(), timeout=1)
@@ -40,10 +54,17 @@ class QueueCSVLogger:
             if payload is None:
                 break
             try:
-                self.writer.writerow(payload)
+                # Support both dicts and JSON strings
+                if isinstance(payload, dict):
+                    self.writer.writerow(payload)
+                else:
+                    self.writer.writerow({"sensor_id": None, "timestamp": None,
+                                          "temperature": None, "humidity": None,
+                                          "battery_pct": None})
                 self.file.flush()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ CSV write error: {e}", flush=True)
+
             self.queue.task_done()
 
     async def log(self, payload):
@@ -60,9 +81,10 @@ class QueueCSVLogger:
                 print("⚠️ Logger task was cancelled during stop.", flush=True)
         self.file.close()
 
-# ----------------------------
-# CLI / main
-# ----------------------------
+
+# ============================================================
+# CLI / Config helpers
+# ============================================================
 def parse_args():
     p = argparse.ArgumentParser(description="Virtual Sensor Simulator")
     p.add_argument("--config", type=str, default="", help="Path to YAML config")
@@ -101,6 +123,9 @@ def load_config(path: str):
         return yaml.safe_load(fh)
 
 
+# ============================================================
+# Main async entry
+# ============================================================
 async def main():
     args = parse_args()
     cfg = {}
@@ -135,7 +160,7 @@ async def main():
     log_csv = get_config_value("log_csv", args.log_csv)
 
     # ----------------------------
-    # Transport
+    # Transport setup
     # ----------------------------
     if transport == "mqtt":
         mqtt_cfg = MQTTConfig(
@@ -206,28 +231,21 @@ async def main():
 
     finally:
         print("🧹 Cleaning up...", flush=True)
-
-        # Stop sensors first
         for s in sensors:
             s.stop()
 
-        # Wait for remaining sensor tasks with timeout
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         if tasks:
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=5
-                )
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
             except asyncio.TimeoutError:
                 print("⚠️ Some tasks did not finish within timeout, proceeding with shutdown.", flush=True)
             except asyncio.CancelledError:
                 print("⚠️ Some tasks were cancelled during shutdown.", flush=True)
 
-        # Stop logger safely with enough timeout for all messages to flush
         if logger:
             try:
-                await asyncio.wait_for(logger.stop(), timeout=20)  # Increased timeout from 5s → 20s
+                await asyncio.wait_for(logger.stop(), timeout=20)
             except asyncio.TimeoutError:
                 print("⚠️ Logger did not finish in time, file may be partially written.", flush=True)
             except asyncio.CancelledError:
