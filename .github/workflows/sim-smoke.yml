@@ -23,13 +23,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Ensure uvloop is installed for performance
+          # Ensure uvloop is installed for stability and performance
           pip install -r requirements.txt aiohttp uvloop
 
       - name: Start HTTP collector in background
         id: start_server
         run: |
           # FIX: Run the stable server.py file directly for robust background execution
+          # This replaces the unstable inline Python block.
           nohup python server.py > server.log 2>&1 &
           echo $! > server.pid
           echo "Server PID: $(cat server.pid)"
@@ -62,7 +63,7 @@ jobs:
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
-          # Create logs directory before running the script
+          # Ensure the logs directory is created before the python script runs
           mkdir -p logs
           python run_sim.py --count 20 --transport http \
             --http-url http://localhost:8080/ingest \
