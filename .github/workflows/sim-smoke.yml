@@ -62,6 +62,13 @@ jobs:
             --http-url http://localhost:8080/ingest \
             --rate 2 --duration 30 --log-csv logs/out.csv
 
+      - name: Check CSV output before upload
+        if: always()
+        run: |
+          echo "Checking CSV file contents..."
+          ls -lh logs
+          head -n 10 logs/out.csv || echo "⚠️ out.csv is empty"
+
       - name: Ensure logs are flushed before upload
         if: always()
         run: |
