@@ -31,43 +31,68 @@ def _ensure_parent_dir(path: str) -> None:
 
 # ============================================================
 # Optimized Async CSV writer with non-blocking I/O
+# (maps payload keys -> stable CSV schema)
 # ============================================================
 
 class QueueCSVLogger:
     def __init__(self, path: str):
         self.path = path
-        # Ensure directory (if any) exists before opening the file
         _ensure_parent_dir(path)
-        self.queue: asyncio.Queue = asyncio.Queue()  # unbounded; fine for CI scale
+        self.queue: asyncio.Queue = asyncio.Queue()
         self.file = open(path, "w", newline="", encoding="utf-8")
+
+        # Keep a stable, simple schema for CI
+        self.fieldnames = ["sensor_id", "timestamp", "temperature", "humidity", "battery_pct"]
+
+        # IMPORTANT: ignore any extra keys (seq, status, firmware, etc.)
         self.writer = csv.DictWriter(
             self.file,
-            fieldnames=["sensor_id", "timestamp", "temperature", "humidity", "battery_pct"],
+            fieldnames=self.fieldnames,
+            extrasaction="ignore",
         )
         self.writer.writeheader()
+
         self._task: asyncio.Task | None = None
         self._count = 0
         self._buffer = []
-        self._WRITE_THRESHOLD = 1000
+        self._WRITE_THRESHOLD = 500  # flush more often in short CI runs
+
+    # ---- mapping helpers ----
+    @staticmethod
+    def _normalize_row(p: dict) -> dict:
+        """
+        Map the sensor payload to our stable schema:
+        - ts            -> timestamp
+        - temperature_c -> temperature
+        - humidity_pct  -> humidity
+        """
+        return {
+            "sensor_id": p.get("sensor_id") or p.get("id") or p.get("sensorId"),
+            "timestamp": p.get("timestamp") or p.get("ts"),
+            "temperature": p.get("temperature") or p.get("temperature_c") or p.get("temp_c"),
+            "humidity": p.get("humidity") or p.get("humidity_pct"),
+            "battery_pct": p.get("battery_pct") or p.get("battery") or p.get("battery_percent"),
+        }
 
     async def start(self):
         self._task = asyncio.create_task(self._writer_task(), name="csv-writer")
 
     async def _writer_task(self):
-        """Continuously drain the async queue and write to CSV."""
         while True:
             payload = await self.queue.get()
-            # A 'None' payload is the sentinel signal to shut down cleanly
-            if payload is None:
+            if payload is None:  # sentinel for shutdown
                 if self._buffer:
                     await self._write_buffer_to_disk()
                 self.queue.task_done()
                 break
 
-            self._buffer.append(payload)
+            # Normalize the row before buffering
+            self._buffer.append(self._normalize_row(payload))
             self._count += 1
+
             if len(self._buffer) >= self._WRITE_THRESHOLD:
                 await self._write_buffer_to_disk()
+
             self.queue.task_done()
 
         # Final flush just in case
@@ -77,7 +102,6 @@ class QueueCSVLogger:
             pass
 
     async def _write_buffer_to_disk(self):
-        """Performs the blocking I/O operation in a separate thread."""
         if not self._buffer:
             return
         buf = self._buffer
@@ -85,26 +109,21 @@ class QueueCSVLogger:
         try:
             await asyncio.to_thread(self.writer.writerows, buf)
             await asyncio.to_thread(self.file.flush)
+            # Only report success after a successful flush
+            print(f"🧾 Logger wrote {self._count} rows to {self.path}", flush=True)
         except Exception as e:
             print(f"⚠️ CSV batch write error: {e}", flush=True)
-
-        if self._count % 1000 == 0:
-            print(f"🧾 Logger wrote {self._count} rows to {self.path}", flush=True)
 
     async def log(self, payload):
         await self.queue.put(payload)
 
     async def stop(self):
-        """Signal the writer to shut down and wait for it to finish."""
         if self._task:
-            # Send the sentinel to the queue
-            await self.queue.put(None)
-            # Wait for the queue to be fully processed
-            await self.queue.join()
-            # Wait for the writer task to exit cleanly
-            await self._task
+            await self.queue.put(None)   # signal shutdown
+            await self.queue.join()      # drain queue
+            await self._task             # wait writer exit
         self.file.close()
-
+        
 # ============================================================
 # CLI / Config helpers
 # ============================================================
