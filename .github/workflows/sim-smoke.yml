@@ -79,7 +79,7 @@ jobs:
           DATA_LINES=$((TOTAL_LINES - 1))
           echo "Total lines (with header): $TOTAL_LINES"
           echo "Data lines (excluding header): $DATA_LINES"
-          MIN_REQUIRED_LINES=20
+          MIN_REQUIRED_LINES=1200
           if [ "$DATA_LINES" -ge "$MIN_REQUIRED_LINES" ]; then
             echo "✅ CSV contains $DATA_LINES data lines (>= $MIN_REQUIRED_LINES)."
           else

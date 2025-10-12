@@ -23,28 +23,35 @@ from sensor_sim.transports import (
 
 def _ensure_parent_dir(path: str) -> None:
     """Create parent directory of 'path' if one exists."""
-    # Resolve to absolute path so dirname is never ''
     abspath = os.path.abspath(path)
     dirpath = os.path.dirname(abspath)
     if dirpath and not os.path.exists(dirpath):
         os.makedirs(dirpath, exist_ok=True)
 
 # ============================================================
-# Optimized Async CSV writer with non-blocking I/O
-# (maps payload keys -> stable CSV schema)
+# Async CSV writer: capture all emitted fields from sensors
+# (schema matches the raw payload keys)
 # ============================================================
 
 class QueueCSVLogger:
+    """
+    Writes each published payload into CSV using a wide schema that matches the
+    sensor payload keys so we capture everything the sensors emit.
+    """
     def __init__(self, path: str):
         self.path = path
         _ensure_parent_dir(path)
         self.queue: asyncio.Queue = asyncio.Queue()
         self.file = open(path, "w", newline="", encoding="utf-8")
 
-        # Keep a stable, simple schema for CI
-        self.fieldnames = ["sensor_id", "timestamp", "temperature", "humidity", "battery_pct"]
+        # Full set of fields currently emitted by the sensors.
+        # If your payload gains new keys in the future, add them here to capture them.
+        self.fieldnames = [
+            "sensor_id", "ts", "temperature_c", "humidity_pct", "battery_pct",
+            "status", "firmware", "seq"
+        ]
 
-        # IMPORTANT: ignore any extra keys (seq, status, firmware, etc.)
+        # Ignore any truly unexpected extras to keep the writer resilient.
         self.writer = csv.DictWriter(
             self.file,
             fieldnames=self.fieldnames,
@@ -55,24 +62,8 @@ class QueueCSVLogger:
         self._task: asyncio.Task | None = None
         self._count = 0
         self._buffer = []
-        self._WRITE_THRESHOLD = 500  # flush more often in short CI runs
-
-    # ---- mapping helpers ----
-    @staticmethod
-    def _normalize_row(p: dict) -> dict:
-        """
-        Map the sensor payload to our stable schema:
-        - ts            -> timestamp
-        - temperature_c -> temperature
-        - humidity_pct  -> humidity
-        """
-        return {
-            "sensor_id": p.get("sensor_id") or p.get("id") or p.get("sensorId"),
-            "timestamp": p.get("timestamp") or p.get("ts"),
-            "temperature": p.get("temperature") or p.get("temperature_c") or p.get("temp_c"),
-            "humidity": p.get("humidity") or p.get("humidity_pct"),
-            "battery_pct": p.get("battery_pct") or p.get("battery") or p.get("battery_percent"),
-        }
+        # Smaller threshold helps ensure multiple flushes in short CI runs
+        self._WRITE_THRESHOLD = 500
 
     async def start(self):
         self._task = asyncio.create_task(self._writer_task(), name="csv-writer")
@@ -86,8 +77,8 @@ class QueueCSVLogger:
                 self.queue.task_done()
                 break
 
-            # Normalize the row before buffering
-            self._buffer.append(self._normalize_row(payload))
+            # Buffer the raw payload; DictWriter will select matching fields.
+            self._buffer.append(payload)
             self._count += 1
 
             if len(self._buffer) >= self._WRITE_THRESHOLD:
@@ -109,7 +100,6 @@ class QueueCSVLogger:
         try:
             await asyncio.to_thread(self.writer.writerows, buf)
             await asyncio.to_thread(self.file.flush)
-            # Only report success after a successful flush
             print(f"🧾 Logger wrote {self._count} rows to {self.path}", flush=True)
         except Exception as e:
             print(f"⚠️ CSV batch write error: {e}", flush=True)
@@ -123,7 +113,7 @@ class QueueCSVLogger:
             await self.queue.join()      # drain queue
             await self._task             # wait writer exit
         self.file.close()
-        
+
 # ============================================================
 # CLI / Config helpers
 # ============================================================
@@ -138,7 +128,7 @@ def parse_args():
     p.add_argument("--transport", choices=["mqtt", "http"], default="mqtt")
     # MQTT
     p.add_argument("--mqtt-host", type=str, default="localhost")
-    p.add_argument("--mqtt-port", type=int, default=1883)
+    p.add_argument("--mqtt-port", type=int, default=1883")
     p.add_argument("--mqtt-username", type=str, default="")
     p.add_argument("--mqtt-password", type=str, default="")
     p.add_argument("--mqtt-qos", type=int, default=0)
@@ -188,17 +178,17 @@ async def main():
     duration = get_config_value("duration", args.duration)
     transport = get_config_value("transport", args.transport)
 
-    drop_rate = get_config_value("faults.drop_rate", args.drop_rate)
-    spike_rate = get_config_value("faults.spike_rate", args.spike_rate)
+    drop_rate   = get_config_value("faults.drop_rate", args.drop_rate)
+    spike_rate  = get_config_value("faults.spike_rate", args.spike_rate)
     fault_every = get_config_value("faults.fault_every", args.fault_every)
 
-    firmware = get_config_value("sensor.firmware", args.firmware)
+    firmware      = get_config_value("sensor.firmware", args.firmware)
     battery_drain = get_config_value("sensor.battery_drain_pct_per_hour", args.battery_drain)
-    base_temp = get_config_value("sensor.value.base_temp_c", args.base_temp)
-    temp_sd = get_config_value("sensor.value.temp_noise_sd", args.temp_sd)
-    base_hum = get_config_value("sensor.value.base_humidity_pct", args.base_hum)
-    hum_sd = get_config_value("sensor.value.humidity_noise_sd", args.hum_sd)
-    log_csv = get_config_value("log_csv", args.log_csv)
+    base_temp     = get_config_value("sensor.value.base_temp_c", args.base_temp)
+    temp_sd       = get_config_value("sensor.value.temp_noise_sd", args.temp_sd)
+    base_hum      = get_config_value("sensor.value.base_humidity_pct", args.base_hum)
+    hum_sd        = get_config_value("sensor.value.humidity_noise_sd", args.hum_sd)
+    log_csv       = get_config_value("log_csv", args.log_csv)
 
     # Transport selection (avoid requiring MQTT deps unless used)
     if transport == "mqtt":
@@ -248,7 +238,6 @@ async def main():
         try:
             loop.add_signal_handler(sig, _signal_handler, sig.name)
         except NotImplementedError:
-            # Windows / restricted envs
             pass
 
     try:
@@ -264,7 +253,7 @@ async def main():
                     if message_counter % 100 == 0:
                         print(f"✅ Published {message_counter} messages", flush=True)
                     if logger:
-                        await logger.log(payload)
+                        await logger.log(payload)  # log raw payload with all fields
                 except Exception as e:
                     print(f"⚠️ Publish error: {e}", flush=True)
 
@@ -272,15 +261,7 @@ async def main():
                 s.on_publish = safe_publish
 
             tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
-
-            # Wait for the tasks to complete, or for a stop signal
-            done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.ALL_COMPLETED
-            )
-            # If we were signaled, cancel any lingering tasks
-            if stop_event.is_set():
-                for t in pending:
-                    t.cancel()
+            await asyncio.gather(*tasks)
 
         print(f"✅ Simulation completed successfully. Total messages: {message_counter}", flush=True)
         return 0
