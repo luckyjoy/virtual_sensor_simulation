@@ -1,11 +1,10 @@
 # FILENAME: run_sim.py
-# PURPOSE:  Simulates a large number of concurrent virtual sensors, generating
-#           time-series data (temp, humidity, battery) with optional faults (spikes, drops).
-#           Data is published asynchronously via MQTT (default) or HTTP, and optionally logged to CSV.
+# PURPOSE: Simulates a large number of concurrent virtual sensors, generating
+# time-series data (temp, humidity, battery) with optional faults (spikes, drops).
+# Data is published asynchronously via MQTT (default) or HTTP, and optionally logged to CSV.
 
-import asyncio, argparse, os, sys, yaml, json, csv, time
+import asyncio, argparse, os, sys, yaml, json, csv, signal
 from typing import List
-import aiomqtt
 
 # On Windows, use SelectorEventLoop
 if sys.platform == "win32":
@@ -19,34 +18,46 @@ from sensor_sim.transports import (
 )
 
 # ============================================================
-# Optimized Async CSV writer with non-blocking I/O (PERFORMANCE FIX)
+# Helpers
 # ============================================================
+
+def _ensure_parent_dir(path: str) -> None:
+    """Create parent directory of 'path' if one exists."""
+    # Resolve to absolute path so dirname is never ''
+    abspath = os.path.abspath(path)
+    dirpath = os.path.dirname(abspath)
+    if dirpath and not os.path.exists(dirpath):
+        os.makedirs(dirpath, exist_ok=True)
+
+# ============================================================
+# Optimized Async CSV writer with non-blocking I/O
+# ============================================================
+
 class QueueCSVLogger:
-    def __init__(self, path):
+    def __init__(self, path: str):
         self.path = path
-        # FIX: Ensure the directory exists before opening the file
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.queue = asyncio.Queue()
+        # Ensure directory (if any) exists before opening the file
+        _ensure_parent_dir(path)
+        self.queue: asyncio.Queue = asyncio.Queue()  # unbounded; fine for CI scale
         self.file = open(path, "w", newline="", encoding="utf-8")
         self.writer = csv.DictWriter(
             self.file,
             fieldnames=["sensor_id", "timestamp", "temperature", "humidity", "battery_pct"],
         )
         self.writer.writeheader()
-        self._task = None
+        self._task: asyncio.Task | None = None
         self._count = 0
         self._buffer = []
         self._WRITE_THRESHOLD = 1000
 
     async def start(self):
-        self._task = asyncio.create_task(self._writer_task())
+        self._task = asyncio.create_task(self._writer_task(), name="csv-writer")
 
     async def _writer_task(self):
         """Continuously drain the async queue and write to CSV."""
         while True:
             payload = await self.queue.get()
-
-            # FIX: A 'None' payload is the sentinel signal to shut down cleanly
+            # A 'None' payload is the sentinel signal to shut down cleanly
             if payload is None:
                 if self._buffer:
                     await self._write_buffer_to_disk()
@@ -55,30 +66,36 @@ class QueueCSVLogger:
 
             self._buffer.append(payload)
             self._count += 1
-
             if len(self._buffer) >= self._WRITE_THRESHOLD:
                 await self._write_buffer_to_disk()
-
             self.queue.task_done()
 
-        print(f"🧾 Logger wrote {self._count} rows to {self.path}", flush=True)
+        # Final flush just in case
+        try:
+            self.file.flush()
+        except Exception:
+            pass
 
     async def _write_buffer_to_disk(self):
         """Performs the blocking I/O operation in a separate thread."""
         if not self._buffer:
             return
+        buf = self._buffer
+        self._buffer = []
         try:
-            await asyncio.to_thread(self.writer.writerows, self._buffer)
+            await asyncio.to_thread(self.writer.writerows, buf)
             await asyncio.to_thread(self.file.flush)
         except Exception as e:
             print(f"⚠️ CSV batch write error: {e}", flush=True)
-        self._buffer.clear()
+
+        if self._count % 1000 == 0:
+            print(f"🧾 Logger wrote {self._count} rows to {self.path}", flush=True)
 
     async def log(self, payload):
         await self.queue.put(payload)
 
     async def stop(self):
-        """FIX: Signal the writer to shut down and wait for it to finish."""
+        """Signal the writer to shut down and wait for it to finish."""
         if self._task:
             # Send the sentinel to the queue
             await self.queue.put(None)
@@ -88,10 +105,10 @@ class QueueCSVLogger:
             await self._task
         self.file.close()
 
-
 # ============================================================
 # CLI / Config helpers
 # ============================================================
+
 def parse_args():
     p = argparse.ArgumentParser(description="Virtual Sensor Simulator")
     p.add_argument("--config", type=str, default="", help="Path to YAML config")
@@ -121,18 +138,18 @@ def parse_args():
     p.add_argument("--temp-sd", type=float, default=0.8)
     p.add_argument("--base-hum", type=float, default=40.0)
     p.add_argument("--hum-sd", type=float, default=3.0)
+    # Logging
     p.add_argument("--log-csv", type=str, default="")
     return p.parse_args()
-
 
 def load_config(path: str):
     with open(path, "r") as fh:
         return yaml.safe_load(fh)
 
-
 # ============================================================
 # Main async entry
 # ============================================================
+
 async def main():
     args = parse_args()
     cfg = load_config(args.config) if args.config else {}
@@ -164,6 +181,7 @@ async def main():
     hum_sd = get_config_value("sensor.value.humidity_noise_sd", args.hum_sd)
     log_csv = get_config_value("log_csv", args.log_csv)
 
+    # Transport selection (avoid requiring MQTT deps unless used)
     if transport == "mqtt":
         mqtt_cfg = MQTTConfig(
             host=get_config_value("mqtt.host", args.mqtt_host),
@@ -184,6 +202,7 @@ async def main():
     logger = QueueCSVLogger(log_csv) if log_csv else None
     if logger:
         await logger.start()
+        print(f"🧾 CSV logging enabled → {os.path.abspath(log_csv)}", flush=True)
 
     sensors: List[VirtualSensor] = []
     for i in range(count):
@@ -197,6 +216,21 @@ async def main():
             on_publish=None, logger=None
         )
         sensors.append(s)
+
+    # Graceful termination support (SIGINT/SIGTERM)
+    stop_event = asyncio.Event()
+
+    def _signal_handler(signame: str):
+        print(f"\n🛑 Received {signame}. Stopping simulation...", flush=True)
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _signal_handler, sig.name)
+        except NotImplementedError:
+            # Windows / restricted envs
+            pass
 
     try:
         print(f"🚀 Starting simulation with {count} sensors via {transport.upper()}...", flush=True)
@@ -219,7 +253,15 @@ async def main():
                 s.on_publish = safe_publish
 
             tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
-            await asyncio.gather(*tasks)
+
+            # Wait for the tasks to complete, or for a stop signal
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.ALL_COMPLETED
+            )
+            # If we were signaled, cancel any lingering tasks
+            if stop_event.is_set():
+                for t in pending:
+                    t.cancel()
 
         print(f"✅ Simulation completed successfully. Total messages: {message_counter}", flush=True)
         return 0
@@ -232,22 +274,20 @@ async def main():
         print("🧹 Cleaning up...", flush=True)
         for s in sensors:
             s.stop()
-
         if logger:
             print("📦 Flushing CSV logger...", flush=True)
             await logger.stop()
-
         print("🛑 Simulation stopped gracefully.", flush=True)
 
 
 if __name__ == "__main__":
     try:
         # Performance improvement: Install and use uvloop for the event loop
-        import uvloop
-        uvloop.install()
-    except Exception:
-        pass
-    try:
+        try:
+            import uvloop  # type: ignore
+            uvloop.install()
+        except Exception:
+            pass
         sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
         print("\n🛑 Keyboard Interrupted. Exiting gracefully...", flush=True)

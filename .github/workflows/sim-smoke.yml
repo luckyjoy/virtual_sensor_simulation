@@ -1,16 +1,7 @@
-name: Run simulation for 20 sensors over HTTP for 30s
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
 jobs:
   run-sim:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,42 +14,41 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt aiohttp uvloop
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install aiohttp uvloop aiomqtt
 
       - name: Start server and wait for readiness
         id: start_server
         run: |
-          # Start the server in the background, logging its output
           nohup python server.py > server.log 2>&1 &
           echo $! > server.pid
           echo "Server PID: $(cat server.pid)"
-          
           echo "Waiting for HTTP server on port 8080..."
-          
-          # Loop for up to 30 seconds, checking for a successful response
-          for i in {1..10}; do
-              # Use curl to verify the ingest endpoint is responding with 200 OK
-              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ingest -X POST -H "Content-Type: application/json" -d '{"test": 1}')
-              
-              if [ "$HTTP_CODE" -eq 200 ]; then
-                  echo "✅ HTTP server is ready! Status: $HTTP_CODE"
-                  exit 0 # Exit successfully from this script
-              fi
-              echo "Server not ready (Status: $HTTP_CODE). Waiting $i/10..."
-              sleep 3
+
+          for i in {1..15}; do
+            HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+              -X POST -H "Content-Type: application/json" \
+              -d '{"test":1}' http://127.0.0.1:8080/ingest || echo "000")
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              echo "✅ HTTP server is ready! Status: $HTTP_CODE"
+              READY=1
+              break
+            fi
+            echo "Server not ready (status: $HTTP_CODE). Attempt $i/15..."
+            sleep 3
           done
-          
-          # If the loop finishes without success, fail the workflow
-          echo "❌ Server failed to start or respond after 30 seconds."
-          echo "--- Server Log (server.log) ---"
-          cat server.log
-          echo "---------------------------"
-          exit 1
+
+          if [ "${READY:-0}" -ne 1 ]; then
+            echo "❌ Server failed to start or respond in time."
+            echo "--- Server Log (server.log) ---"
+            sed -n '1,200p' server.log || true
+            exit 1
+          fi
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
-          # The corrected python script will create the 'logs' directory,
-          # but creating it here is a good defensive practice.
           mkdir -p logs
           python run_sim.py --count 20 --transport http \
             --http-url http://localhost:8080/ingest \
@@ -68,25 +58,22 @@ jobs:
         if: always()
         run: |
           echo "Checking logs directory contents..."
-          ls -lh logs
+          ls -lh logs || echo "(logs/ does not exist yet)"
 
       - name: Verify CSV has at least 20 data lines
         run: |
           CSV_FILE="logs/out.csv"
           TOTAL_LINES=$(wc -l < "$CSV_FILE" | tr -d ' ')
           DATA_LINES=$((TOTAL_LINES - 1))
-          
-          echo "Total lines in CSV (including header): $TOTAL_LINES"
+          echo "Total lines (with header): $TOTAL_LINES"
           echo "Data lines (excluding header): $DATA_LINES"
-          
           MIN_REQUIRED_LINES=20
-          
           if [ "$DATA_LINES" -ge "$MIN_REQUIRED_LINES" ]; then
-              echo "✅ Success: CSV contains $DATA_LINES data lines, which is >= $MIN_REQUIRED_LINES."
+            echo "✅ CSV contains $DATA_LINES data lines (>= $MIN_REQUIRED_LINES)."
           else
-              echo "❌ Failure: CSV contains only $DATA_LINES data lines. Expected at least $MIN_REQUIRED_LINES."
-              head -n 10 "$CSV_FILE"
-              exit 1
+            echo "❌ CSV contains only $DATA_LINES data lines."
+            head -n 10 "$CSV_FILE"
+            exit 1
           fi
 
       - name: Ensure logs are flushed before upload
@@ -110,8 +97,8 @@ jobs:
         if: always()
         run: |
           if [ -f server.pid ]; then
-              echo "Stopping HTTP server..."
-              kill -9 $(cat server.pid) || true
-              rm server.pid
+            echo "Stopping HTTP server..."
+            kill -9 "$(cat server.pid)" 2>/dev/null || true
+            rm -f server.pid
           fi
           echo "Cleanup done."
