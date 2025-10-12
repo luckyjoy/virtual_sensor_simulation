@@ -29,7 +29,10 @@ jobs:
           fi
           # Explicit deps used by this workflow
           pip install aiohttp uvloop aiomqtt
-
+      - name: Syntax check
+        run: |
+          python -m py_compile run_sim.py server.py
+    
       - name: Start server and wait for readiness
         id: start_server
         shell: bash
@@ -72,7 +75,7 @@ jobs:
           echo "Checking logs directory contents..."
           ls -lh logs || echo "(logs/ does not exist yet)"
 
-      - name: Verify CSV has at least 20 data lines
+      - name: Verify CSV has at least 1200 data lines
         run: |
           CSV_FILE="logs/out.csv"
           TOTAL_LINES=$(wc -l < "$CSV_FILE" | tr -d ' ')

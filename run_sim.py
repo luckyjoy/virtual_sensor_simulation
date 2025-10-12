@@ -128,7 +128,7 @@ def parse_args():
     p.add_argument("--transport", choices=["mqtt", "http"], default="mqtt")
     # MQTT
     p.add_argument("--mqtt-host", type=str, default="localhost")
-    p.add_argument("--mqtt-port", type=int, default=1883")
+    p.add_argument("--mqtt-port", type=int, default=1883)  # <-- fixed
     p.add_argument("--mqtt-username", type=str, default="")
     p.add_argument("--mqtt-password", type=str, default="")
     p.add_argument("--mqtt-qos", type=int, default=0)
@@ -233,12 +233,17 @@ async def main():
         print(f"\n🛑 Received {signame}. Stopping simulation...", flush=True)
         stop_event.set()
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _signal_handler, sig.name)
-        except NotImplementedError:
-            pass
+    loop = asyncio.get_running_loop
+    try:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _signal_handler, sig.name)
+            except NotImplementedError:
+                pass
+    except RuntimeError:
+        # In case there's no running loop yet (rare in CI here)
+        pass
 
     try:
         print(f"🚀 Starting simulation with {count} sensors via {transport.upper()}...", flush=True)
@@ -288,6 +293,8 @@ if __name__ == "__main__":
             uvloop.install()
         except Exception:
             pass
+        # Quick sanity: fail fast on syntax errors if someone runs this directly
+        # (CI can also run: python -m py_compile run_sim.py server.py)
         sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
         print("\n🛑 Keyboard Interrupted. Exiting gracefully...", flush=True)
