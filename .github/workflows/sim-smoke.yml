@@ -62,13 +62,23 @@ jobs:
             --http-url http://localhost:8080/ingest \
             --rate 2 --duration 30 --log-csv logs/out.csv
 
-      - name: Check CSV output before upload
-        if: always()
-        run: |
-          echo "Checking CSV file contents..."
-          ls -lh logs
-          head -n 10 logs/out.csv || echo "⚠️ out.csv is empty"
+      - name: Check out.csv line count
+            run: |
+              if [ ! -f logs/out.csv ]; then
+                echo "❌ Error: logs/out.csv not found."
+                exit 1
+              fi
 
+              lines=$(wc -l < logs/out.csv)
+              echo "📄 out.csv has $lines lines."
+
+              if [ "$lines" -lt 21 ]; then
+                echo "❌ Error: out.csv must have at least 20 data rows (plus header)."
+                exit 1
+              fi
+
+          echo "✅ CSV line count check passed."
+          
       - name: Ensure logs are flushed before upload
         if: always()
         run: |

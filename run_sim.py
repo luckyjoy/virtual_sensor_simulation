@@ -1,4 +1,4 @@
-import asyncio, argparse, os, sys, yaml, json, csv
+import asyncio, argparse, os, sys, yaml, json, csv, time
 from typing import List
 import aiomqtt
 
@@ -14,29 +14,21 @@ from sensor_sim.transports import (
 )
 
 # ============================================================
-# Safe async CSV writer that actually writes to the right file
+# Reliable async CSV writer with graceful shutdown
 # ============================================================
 class QueueCSVLogger:
     def __init__(self, path):
         self.path = path
         self.queue = asyncio.Queue()
         self.file = open(path, "w", newline="", encoding="utf-8")
-
-        # ✅ Use DictWriter to log consistent sensor data
         self.writer = csv.DictWriter(
             self.file,
-            fieldnames=[
-                "sensor_id",
-                "timestamp",
-                "temperature",
-                "humidity",
-                "battery_pct",
-            ],
+            fieldnames=["sensor_id", "timestamp", "temperature", "humidity", "battery_pct"],
         )
         self.writer.writeheader()
-
         self._task = None
         self._stopping = False
+        self._count = 0
 
     async def start(self):
         self._task = asyncio.create_task(self._writer_task())
@@ -53,19 +45,18 @@ class QueueCSVLogger:
 
             if payload is None:
                 break
+
             try:
-                # Support both dicts and JSON strings
                 if isinstance(payload, dict):
                     self.writer.writerow(payload)
-                else:
-                    self.writer.writerow({"sensor_id": None, "timestamp": None,
-                                          "temperature": None, "humidity": None,
-                                          "battery_pct": None})
+                    self._count += 1
                 self.file.flush()
             except Exception as e:
                 print(f"⚠️ CSV write error: {e}", flush=True)
 
             self.queue.task_done()
+
+        print(f"🧾 Logger wrote {self._count} rows to {self.path}", flush=True)
 
     async def log(self, payload):
         await self.queue.put(payload)
@@ -75,10 +66,7 @@ class QueueCSVLogger:
         await self.queue.join()
         await self.queue.put(None)
         if self._task:
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                print("⚠️ Logger task was cancelled during stop.", flush=True)
+            await asyncio.shield(self._task)
         self.file.close()
 
 
@@ -88,10 +76,10 @@ class QueueCSVLogger:
 def parse_args():
     p = argparse.ArgumentParser(description="Virtual Sensor Simulator")
     p.add_argument("--config", type=str, default="", help="Path to YAML config")
-    p.add_argument("--count", type=int, default=100, help="Number of sensors")
-    p.add_argument("--rate", type=float, default=1.0, help="Messages per second per sensor")
-    p.add_argument("--jitter", type=float, default=0.2, help="Seconds of +/- jitter per publish")
-    p.add_argument("--duration", type=int, default=0, help="Seconds to run (0 = infinite)")
+    p.add_argument("--count", type=int, default=100)
+    p.add_argument("--rate", type=float, default=1.0)
+    p.add_argument("--jitter", type=float, default=0.2)
+    p.add_argument("--duration", type=int, default=0)
     p.add_argument("--transport", choices=["mqtt", "http"], default="mqtt")
     # MQTT
     p.add_argument("--mqtt-host", type=str, default="localhost")
@@ -128,9 +116,7 @@ def load_config(path: str):
 # ============================================================
 async def main():
     args = parse_args()
-    cfg = {}
-    if args.config:
-        cfg = load_config(args.config)
+    cfg = load_config(args.config) if args.config else {}
 
     def get_config_value(path: str, default=None):
         cur = cfg
@@ -159,9 +145,6 @@ async def main():
     hum_sd = get_config_value("sensor.value.humidity_noise_sd", args.hum_sd)
     log_csv = get_config_value("log_csv", args.log_csv)
 
-    # ----------------------------
-    # Transport setup
-    # ----------------------------
     if transport == "mqtt":
         mqtt_cfg = MQTTConfig(
             host=get_config_value("mqtt.host", args.mqtt_host),
@@ -183,9 +166,6 @@ async def main():
     if logger:
         await logger.start()
 
-    # ----------------------------
-    # Create sensors
-    # ----------------------------
     sensors: List[VirtualSensor] = []
     for i in range(count):
         sid = f"vs-{i:04d}"
@@ -222,7 +202,7 @@ async def main():
             tasks = [asyncio.create_task(s.run(duration_s=duration)) for s in sensors]
             await asyncio.gather(*tasks)
 
-        print("✅ Simulation completed successfully.", flush=True)
+        print(f"✅ Simulation completed successfully. Total messages: {message_counter}", flush=True)
         return 0
 
     except Exception as e:
@@ -234,22 +214,9 @@ async def main():
         for s in sensors:
             s.stop()
 
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        if tasks:
-            try:
-                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
-            except asyncio.TimeoutError:
-                print("⚠️ Some tasks did not finish within timeout, proceeding with shutdown.", flush=True)
-            except asyncio.CancelledError:
-                print("⚠️ Some tasks were cancelled during shutdown.", flush=True)
-
         if logger:
-            try:
-                await asyncio.wait_for(logger.stop(), timeout=20)
-            except asyncio.TimeoutError:
-                print("⚠️ Logger did not finish in time, file may be partially written.", flush=True)
-            except asyncio.CancelledError:
-                print("⚠️ Logger stop was cancelled, proceeding.", flush=True)
+            print("📦 Flushing CSV logger...", flush=True)
+            await logger.stop()
 
         print("🛑 Simulation stopped gracefully.", flush=True)
 
