@@ -23,13 +23,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt aiohttp
+          # Ensure uvloop is installed for performance
+          pip install -r requirements.txt aiohttp uvloop
 
       - name: Start HTTP collector in background
         id: start_server
         run: |
-          # FIX: Use the dedicated server.py file for a stable aiohttp background process.
-          # The web.run_app() call in server.py will now run reliably in the background.
+          # FIX: Run the stable server.py file directly for robust background execution
           nohup python server.py > server.log 2>&1 &
           echo $! > server.pid
           echo "Server PID: $(cat server.pid)"
@@ -39,7 +39,7 @@ jobs:
           echo "Waiting for HTTP server on port 8080..."
           
           for i in {1..10}; do
-              # Robust check: Use curl to verify the /ingest endpoint returns 200 OK
+              # FIX: Use curl to verify the actual /ingest application endpoint is responding with 200 OK
               HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ingest -X POST -H "Content-Type: application/json" -d '{"test": 1}')
               
               if [ "$HTTP_CODE" -eq 200 ]; then
@@ -72,8 +72,7 @@ jobs:
         run: |
           echo "Checking logs directory contents..."
           ls -lh logs
-
-      # Re-added the mandatory validation step
+          
       - name: Verify CSV has at least 20 data lines
         run: |
           CSV_FILE="logs/out.csv"

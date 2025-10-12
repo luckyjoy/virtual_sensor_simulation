@@ -1,5 +1,11 @@
 #server.py
 from aiohttp import web
+# Performance improvement: Use uvloop if available
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
 
 async def ingest(request):
     try:
