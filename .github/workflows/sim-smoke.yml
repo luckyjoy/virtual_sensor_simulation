@@ -1,7 +1,17 @@
+name: Virtual Sensor Simulation (HTTP)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
 jobs:
   run-sim:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -9,7 +19,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -17,10 +27,12 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
+          # Explicit deps used by this workflow
           pip install aiohttp uvloop aiomqtt
 
       - name: Start server and wait for readiness
         id: start_server
+        shell: bash
         run: |
           nohup python server.py > server.log 2>&1 &
           echo $! > server.pid
