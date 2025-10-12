@@ -28,13 +28,10 @@ jobs:
 
       # ------------------------------------------------------------------
       # Server Fix: Start the HTTP collector using the dedicated server.py file
-      # This is more robust than running inline Python in a shell.
+      # This ensures proper aiohttp startup and backgrounding.
       - name: Start HTTP collector in background
         id: start_server
         run: |
-          # Use server.py (or save the inline code to a file) to ensure proper aiohttp startup
-          # We'll use the inline approach as before but ensure nohup/backgrounding is clean
-          
           # 1. Create a temporary server file with uvloop support
           cat <<'PY_SERVER' > /tmp/server_runner.py
           import asyncio
@@ -49,6 +46,7 @@ jobs:
           async def ingest(request):
               # This function must return a response quickly.
               try:
+                  # Read data, but don't do anything that blocks the event loop
                   data = await request.json()
               except Exception:
                   pass
@@ -57,7 +55,6 @@ jobs:
           app = web.Application()
           app.add_routes([web.post('/ingest', ingest)])
           
-          # web.run_app is blocking, so we run it in the background using nohup
           if __name__ == "__main__":
               web.run_app(app, port=8080)
           
@@ -69,21 +66,40 @@ jobs:
           echo "Server PID: $(cat server.pid)"
       # ------------------------------------------------------------------
 
-      - name: Wait for HTTP server readiness
+      # ------------------------------------------------------------------
+      # Robustness Fix: Use curl for application-level health check and print logs on failure.
+      - name: Wait for HTTP server readiness & Check Logs
         run: |
           echo "Waiting for HTTP server on port 8080..."
-          for i in {1..30}; do
-              if nc -z localhost 8080; then
-                  echo "HTTP server is ready!"
+          
+          for i in {1..10}; do
+              # Use a simple GET request to check if the aiohttp server is responding at all (will return 404/405/200)
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+              
+              # Check for standard server response codes (2xx, 3xx, 4xx) which indicate the app is alive
+              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+                  echo "HTTP server is ready! Status: $HTTP_CODE"
                   break
               fi
-              sleep 1
+              echo "Server not ready (Status: $HTTP_CODE). Waiting $i/10..."
+              sleep 3
           done
-          nc -z localhost 8080 || { echo "Server failed to start"; cat server.log; exit 1; }
+          
+          # Final check and log dump if still failing
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+          if ! ([ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]); then
+              echo "❌ Server failed to start or respond after 30 seconds. Status: $HTTP_CODE"
+              echo "--- Server Log (server.log) ---"
+              cat server.log
+              echo "---------------------------"
+              exit 1
+          fi
+      # ------------------------------------------------------------------
 
       - name: Run 20 sensors over HTTP for 30s
         run: |
           mkdir -p logs
+          # Simulation is expected to log data now that the server is robustly checked
           python run_sim.py --count 20 --transport http \
             --http-url http://localhost:8080/ingest \
             --rate 2 --duration 30 --log-csv logs/out.csv
@@ -97,9 +113,7 @@ jobs:
       - name: Verify CSV has at least 20 data lines
         run: |
           CSV_FILE="logs/out.csv"
-          # Get total lines (header + data)
           TOTAL_LINES=$(wc -l < "$CSV_FILE" | tr -d ' ')
-          # Data lines = Total lines - 1 (for the header)
           DATA_LINES=$((TOTAL_LINES - 1))
           
           echo "Total lines in CSV (including header): $TOTAL_LINES"
@@ -111,7 +125,6 @@ jobs:
               echo "✅ Success: CSV contains $DATA_LINES data lines, which is >= $MIN_REQUIRED_LINES."
           else
               echo "❌ Failure: CSV contains only $DATA_LINES data lines. Expected at least $MIN_REQUIRED_LINES."
-              # Print the first 10 lines for debugging if the check fails
               head -n 10 "$CSV_FILE"
               exit 1
           fi
